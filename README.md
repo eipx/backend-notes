@@ -9,7 +9,7 @@ Personal reference, kept short on purpose.
 
 ## Problem set
 
-`problems/` holds 24 worked problems across four groups (windows and pointers, prefix sum / monotonic stack / heap, binary search / BFS / graphs / intervals, and data-structure design). Each has a detailed study page and a standalone Java 8 solution with its own test runner. Start at [problems/README.md](problems/README.md).
+`problems/` holds 38 worked problems across six groups (windows and pointers, prefix sum / monotonic stack / heap, binary search / BFS / intervals, graphs and union-find, linked lists, and data-structure design). Each has a detailed study page and a standalone Java 8 solution with its own test runner. Start at [problems/README.md](problems/README.md).
 
 Run any solution with:
 
