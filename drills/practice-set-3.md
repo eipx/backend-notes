@@ -36,3 +36,6 @@ input before calling it done. Stop at 25 minutes.
 
 Problems 2, 4 and 6 also have a study page and a finished solution one folder
 above the practice file. The other seventeen have the practice file only.
+
+The same twenty files are in the folder `drills/practice-set-3/` as plain text,
+numbered in this order. The README of that folder shows every file inline.
