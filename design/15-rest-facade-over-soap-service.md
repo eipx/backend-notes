@@ -167,3 +167,57 @@ Everything else can wait.
   per-request timeout and no body-size limit; authentication is left to the deployment, and session
   tokens should be treated as guessable.
 - Token decoding never throws; an empty request body parses to an empty JSON map.
+
+## Follow-up: review of the fix
+
+The author applied the minimum merge set plus the two cheap-insurance items. Notes on the
+resulting diff.
+
+### Done as recommended
+
+- `contextId` is read from the JSON body (`parseJsonObject(readRequestBody(...))`, then
+  `toString().trim()`, `null` when absent). An empty body or `{}` parses to an empty map, so
+  `contextID` is `null` and a new process starts, which matches the domain's existing
+  null-or-empty check. The route Javadoc, the query-parameter table (row removed), and a new
+  request-body section all agree with the code; the documentation page already sent a body, so
+  it works without changes.
+- `CopyOnWriteArrayList` and `ConcurrentHashMap` in the two per-session `initProperty` calls;
+  unused imports removed. The session-close loop and the `contains` ownership check are
+  unaffected.
+- `maxTimeout` (default 60 000 ms) is checked inside the existing parse block; out-of-range
+  values get `400` with the allowed range in the message, and the error path returns `null` like
+  the rest of the file. The Javadoc says why the cap exists. The parameter table and the `400`
+  row both mention it.
+- A `500` row was added with the right description.
+
+### Two things to look at
+
+1. **The forwarder flag defaults to on.** Its Javadoc says deployments that do not serve the
+   documentation page should set it to `false`. That inverts the gate: every instance forwards
+   unless an operator opts out, so fleet behavior is identical to before the fix, and the
+   protection exists only where someone remembered the property. Defaulting to `false` and
+   setting it `true` on the host that serves the documentation page gives the same demo with a
+   gate that does something. If the permissive default is deliberate, list the property in the
+   configuration reference so the opt-out is discoverable, and say in the Javadoc that the
+   default is permissive on purpose.
+2. **`timeout` is still advertised on `POST .../calls`.** The updated table lists `calls` next to
+   `responses` and `callbacks`, but `CallExchange` ignores the argument (the wait is the fixed
+   `exchangeTimeout`). Unless the change also wires it through, the page still promises something
+   the route does not do: drop `calls` from that row and `optionalQuery: ['timeout']` from the
+   `link-call` endpoint entry, or wire it.
+
+### Small
+
+- `maxTimeout` and the forwarder's read timeout are configured independently, so a deployment can
+  set `maxTimeout` above the forwarder's timeout and silently lose the protection. A one-line
+  startup warning when `maxTimeout` is not below the forwarder timeout closes that.
+- The `204` row still reads "no message available within the timeout". Acceptable to leave, since
+  dead-process detection is a separate ticket.
+
+Net: with the default flipped (or consciously documented) and the `calls` row fixed, this is
+mergeable.
+
+### One lesson worth keeping
+
+A safety flag with a permissive default is documentation, not a gate. If the fix is "add a
+switch", the review question is "what happens on a host where nobody touches the switch".
