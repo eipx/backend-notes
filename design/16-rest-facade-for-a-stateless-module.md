@@ -785,3 +785,30 @@ helpers it called found four things, all fixed above:
 The Link change taught "the pattern"; this change is where the pattern would have led astray.
 Before copying a sub-router under a session, ask what owns the resource. If nothing does, the
 URL should not pretend otherwise.
+
+## The patch
+
+The complete change is beside this note as
+[`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch):
+a unified diff with two lines of context over 16 files (+1756/−26) — the router interface, the
+core registry, the facade, the two test classes, the shared binary sender, the raw-query fix, the
+module page, nine explorer cards and endpoint-map entries, route summary, configuration
+reference, the default module list, and the one-line correction to the file-system module's
+page.
+
+Identifiers in the patch are renamed consistently (package root, product and module names), so
+its paths will not match any tree you have; it is meant to be read with the note, not applied as
+is.
+
+What was verified before publishing, and what was not:
+
+- Compiled with `javac` against the real project sources, with the third-party APIs (logging,
+  JAX-WS annotations, JUnit) replaced by minimal stubs: zero errors across 146 classes.
+- The two test classes were executed against the real file-system module on a temporary
+  directory: 41 passed, 0 failed, 1 skipped — the unreadable-file case, which the host operating
+  system could not simulate. The test for a body delivered in small chunks is the one that would
+  have caught the first draft's single-read bug; the test for `+` and `%` in a path is the one
+  that exercises the raw-query fix end to end.
+- Not done: a build through the project's own pipeline, and a run against a live agent. A
+  smoke script against a running instance is the natural next step and can be strict for every
+  route, since file operations are deterministic.
