@@ -1,46 +1,19 @@
-# Sanitized patch for design note 16: a REST facade for a stateless module.
-# Identifiers are renamed consistently (package root, product and module names), so
-# the paths will not match any public tree; the patch is for reading alongside the
-# note and for restoring to its original names before applying. Unified diff, 2 lines
-# of context, 16 files, +1756/-26.
-# Verification: compiled with javac against the real project sources (zero errors;
-# third-party APIs stubbed for the compile), and the two new test classes were
-# executed against the real file-system module: 41 passed, 0 failed, 1 skipped (an
-# unreadable-file case the host OS could not simulate). Not built or run through the
-# project's own build pipeline.
+# Sanitized patch for design note 16: a REST facade for a stateless module (feature).
+# Depends on 17-rest-namespace-registration.patch (the unified namespace API). Identifiers are
+# renamed consistently (package root, product and module names), so the paths will not match
+# any public tree; the patch is for reading alongside the note and for restoring to its original
+# names before applying. Unified diff, 2 lines of context, 9 files, +1464/-3.
+# Verification: compiled with javac against the real project sources (zero errors; third-party
+# APIs stubbed for the compile); the facade's tests were executed against the real file-system
+# module: 35 cases, all passed except one skipped (an unreadable-file case the host OS could not
+# simulate). Not built or run through the project's own build pipeline.
 
-diff --git a/core-module/pom.xml b/core-module/pom.xml
-index a76f9851..6e1efb81 100644
---- a/core-module/pom.xml
-+++ b/core-module/pom.xml
-@@ -77,4 +77,10 @@
- 			<scope>test</scope>
- 		</dependency>
-+		<dependency>
-+			<groupId>org.mockito</groupId>
-+			<artifactId>mockito-core</artifactId>
-+			<version>4.11.0</version>
-+			<scope>test</scope>
-+		</dependency>
- 	</dependencies>
- 
-diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/AbstractRESTModule.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/AbstractRESTModule.java
-index acbb9368..d086d0de 100644
---- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/AbstractRESTModule.java
-+++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/AbstractRESTModule.java
-@@ -129,5 +129,5 @@ public abstract class AbstractRESTModule extends AbstractStoppableModule impleme
-      * @return context The HTTP context to remove.
-      */
--    private void removeContext(HttpContext httpContext)
-+    protected void removeContext(HttpContext httpContext)
-     {
-         Logging.Entry(logger, this);
 diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
 new file mode 100644
-index 00000000..6e9873e9
+index 00000000..b02458a0
 --- /dev/null
 +++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
-@@ -0,0 +1,590 @@
+@@ -0,0 +1,592 @@
 +package io.github.eipx.remoteagent.modules.core;
 +
 +import java.io.ByteArrayOutputStream;
@@ -54,13 +27,14 @@ index 00000000..6e9873e9
 +
 +import org.apache.log4j.Logger;
 +
++import io.github.eipx.remoteagent.http.Session;
 +import io.github.eipx.remoteagent.io.Config;
 +import io.github.eipx.remoteagent.io.IOUtil;
 +import io.github.eipx.remoteagent.logging.LogUtil;
 +import io.github.eipx.remoteagent.logging.Logging;
 +import io.github.eipx.remoteagent.modules.AbstractStoppableModule;
 +import io.github.eipx.remoteagent.modules.ModuleManager;
-+import io.github.eipx.remoteagent.rest.RESTRootRouter;
++import io.github.eipx.remoteagent.rest.RESTNamespaceHandler;
 +import io.github.eipx.remoteagent.rest.RESTRouter;
 +import io.github.eipx.remoteagent.rest.RESTRouter.Route;
 +import io.github.eipx.remoteagent.rest.RESTUtil;
@@ -69,8 +43,8 @@ index 00000000..6e9873e9
 + * This class implements the REST entry point for the file system (FS)
 + * module. File system operations are not owned by a session, so this module
 + * registers the root namespace {@code "fs"} on {@link RESTModuleImpl} via
-+ * {@link RESTModuleImpl#registerRootRouter(String, RESTRootRouter)} rather
-+ * than a session-scoped sub-router, and delegates every request to the
++ * {@link RESTModuleImpl#registerNamespace(String, RESTNamespaceHandler, boolean)} with
++ * {@code requireSession} false, and delegates every request to the
 + * public methods of {@link FSModuleImpl} — the same domain logic used by the
 + * SOAP (JAX-WS) entry point. Paths travel URL-encoded in the {@code path}
 + * query parameter and are interpreted exactly as SOAP interprets them.
@@ -98,14 +72,14 @@ index 00000000..6e9873e9
 + * <p>{@code FSModuleImpl} is part of the default module list, so this module
 + * is listed there as well; see {@code agent.properties}.
 + *
-+ * @see		io.github.eipx.remoteagent.rest.RESTRootRouter
++ * @see		io.github.eipx.remoteagent.rest.RESTNamespaceHandler
 + * @see		io.github.eipx.remoteagent.rest.RESTRouter
 + * @see		io.github.eipx.remoteagent.modules.core.RESTModuleImpl
 + * @see		io.github.eipx.remoteagent.modules.core.FSModuleImpl
 + *
 + * @author  (redacted)
 + */
-+public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseModule, RESTRootRouter
++public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseModule, RESTNamespaceHandler
 +{
 +	/**
 +	 * Static log4j {@code Logger}.
@@ -188,7 +162,7 @@ index 00000000..6e9873e9
 +				return Logging.Exit(logger, this, false);
 +			}
 +
-+			result = restModuleImpl.registerRootRouter(FS_NAMESPACE, this);
++			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, false);
 +			if(!result) logger.error(String.format("Unable to register REST root namespace: %s", FS_NAMESPACE));
 +		}
 +
@@ -200,25 +174,26 @@ index 00000000..6e9873e9
 +	{
 +		Logging.Entry(logger, this, moduleManager);
 +
-+		if(restModuleImpl != null) restModuleImpl.unregisterRootRouter(FS_NAMESPACE);
++		if(restModuleImpl != null) restModuleImpl.unregisterNamespace(FS_NAMESPACE);
 +		restModuleImpl = null;
 +		fsModuleImpl = null;
 +
 +		return Logging.Exit(logger, this, super.unload(moduleManager));
 +	}
 +
-+	// RESTRootRouter Members
++	// RESTNamespaceHandler Members
 +
 +	/**
 +	 * Dispatches a request within the {@code "fs"} namespace.
 +	 *
 +	 * @param	exchange	The HTTP exchange.
++	 * @param	session		Always {@code null}: the namespace is registered without a session.
 +	 * @param	segments	Path segments relative to the namespace.
 +	 *
 +	 * @throws Throwable
 +	 */
 +	@Override
-+	public void handle(final HttpExchange exchange, final String[] segments) throws Throwable
++	public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
 +	{
 +		Logging.Entry(logger, this, exchange, segments);
 +
@@ -631,196 +606,9 @@ index 00000000..6e9873e9
 +		return LogUtil.getUnqualifyClassName(this);
 +	}
 +}
-diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
-index 1921ca6b..174b4b22 100644
---- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
-+++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
-@@ -11,4 +11,5 @@ import io.github.eipx.remoteagent.nio.process.NativeProcess;
- import io.github.eipx.remoteagent.nio.process.PerlProcess;
- 
-+import io.github.eipx.remoteagent.rest.RESTRootRouter;
- import io.github.eipx.remoteagent.rest.RESTRouter;
- import io.github.eipx.remoteagent.rest.RESTRouter.Route;
-@@ -17,4 +18,5 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
- import org.apache.log4j.Logger;
- 
-+import com.sun.net.httpserver.HttpContext;
- import com.sun.net.httpserver.HttpExchange;
- import java.io.IOException;
-@@ -58,4 +60,12 @@ import java.util.regex.Pattern;
-  *   .../{sessionToken}/link/...                                               Link module (if loaded)
-  *
-+ * Modules whose operations are not owned by a session register a
-+ * {@link RESTRootRouter} for a root namespace via
-+ * {@link #registerRootRouter(String, RESTRootRouter)}. The namespace is bound
-+ * as its own HTTP context, {@code /agent/{namespace}}, and requests under it
-+ * are delegated without session resolution.
-+ *
-+ *   /agent/fs/...                                                             file system module (if loaded)
-+ *
-  * The module also supports an opt-in {@code X-Forward-To} request-forwarding
-  * mode (see {@link #TARGET_HOST_HEADER}) that exists solely so the interactive
-@@ -117,4 +127,24 @@ public class RESTModuleImpl extends AbstractRESTModule
-     private static final Set<String> RESERVED_NAMESPACES = new HashSet<String>(Collections.singletonList("processes"));
- 
-+    /**
-+     * Prefix under which root namespaces are bound: {@code /agent/{namespace}}.
-+     */
-+    public static final String ROOT_CONTEXT_PREFIX = "/agent/";
-+
-+    /**
-+     * Root namespaces owned by the core REST module itself; root routers may
-+     * not be registered for these.
-+     */
-+    private static final Set<String> RESERVED_ROOT_NAMESPACES = new HashSet<String>(Arrays.asList("sessions", "admin"));
-+
-+    /**
-+     * Mapping of root namespaces to domain routers registered by other modules
-+     * (e.g. {@code "fs"}), and the HTTP contexts bound for them. Requests
-+     * under {@code /agent/{namespace}/...} are delegated to the corresponding
-+     * router without session resolution.
-+     */
-+    private final ConcurrentMap<String, RESTRootRouter> rootRouters  = new ConcurrentHashMap<String, RESTRootRouter>();
-+    private final ConcurrentMap<String, HttpContext>    rootContexts = new ConcurrentHashMap<String, HttpContext>();
-+
-     private static final String LOG_LEVEL_SEGMENT = "check_trace_level";
- 
-@@ -174,4 +204,6 @@ public class RESTModuleImpl extends AbstractRESTModule
-     {
-         Logging.Entry(logger, this, moduleManager);
-+        // Root contexts left behind by a dependent module unloaded out of order
-+        for(String namespace : new ArrayList<String>(rootContexts.keySet())) unregisterRootRouter(namespace);
-         processModuleImpl = null;
-         return Logging.Exit(logger, this, super.unload(moduleManager));
-@@ -192,6 +224,7 @@ public class RESTModuleImpl extends AbstractRESTModule
-                 String[] segments = RESTUtil.getPathSegments(exchange);
-                 String requestContext = exchange.getHttpContext().getPath();
--                if(ADMIN_CONTEXT_PATH.equalsIgnoreCase(requestContext)) handleAdminRequest(exchange, method, segments);
--                else                                                    handleSessionRequest(exchange, method, segments);
-+                if(ADMIN_CONTEXT_PATH.equalsIgnoreCase(requestContext))        handleAdminRequest(exchange, method, segments);
-+                else if(SESSION_CONTEXT_PATH.equalsIgnoreCase(requestContext)) handleSessionRequest(exchange, method, segments);
-+                else                                                           handleRootRequest(exchange, requestContext, segments);
-             }
-         }
-@@ -366,4 +399,115 @@ public class RESTModuleImpl extends AbstractRESTModule
-     }
- 
-+    /**
-+     * Routes a request under a root namespace ({@code /agent/{namespace}/...})
-+     * to the registered {@link RESTRootRouter}. No session is resolved.
-+     *
-+     * @param exchange    The HTTP exchange.
-+     * @param contextPath The bound context path, {@code /agent/{namespace}}.
-+     * @param segments    The path segments relative to the context.
-+     *
-+     * @throws Throwable
-+     */
-+    private void handleRootRequest(final HttpExchange exchange, final String contextPath, final String[] segments) throws Throwable
-+    {
-+        Logging.Entry(logger, this, exchange, contextPath, segments);
-+        RESTRootRouter router = (contextPath != null && contextPath.startsWith(ROOT_CONTEXT_PREFIX))
-+                ? rootRouters.get(contextPath.substring(ROOT_CONTEXT_PREFIX.length())) : null;
-+        if(router == null) RESTUtil.sendNotFound(exchange);
-+        else               router.handle(exchange, segments);
-+        Logging.Exit(logger, this);
-+    }
-+
-+    /**
-+     * Registers a domain router for a root namespace, binding
-+     * {@code /agent/{namespace}} as its own HTTP context on the shared server.
-+     * Unlike {@link #registerSubRouter(String, RESTSubRouter)} no session is
-+     * resolved before delegation; this is for modules whose operations are
-+     * not owned by a session.
-+     *
-+     * @param namespace The first-level path segment under {@code /agent/}
-+     *                  (e.g. {@code "fs"}). Must not be empty, contain
-+     *                  {@code "/"}, be a wildcard, or be a reserved namespace.
-+     * @param router    The router to invoke for the namespace.
-+     *
-+     * @return {@code true} if the router was registered, {@code false} if the
-+     *         namespace is invalid, reserved, already registered, or already
-+     *         bound by another handler.
-+     */
-+    public boolean registerRootRouter(final String namespace, final RESTRootRouter router)
-+    {
-+        Logging.Entry(logger, this, namespace, router);
-+
-+        if(namespace == null || namespace.isEmpty() || namespace.contains("/") || "*".equals(namespace)
-+                || RESERVED_ROOT_NAMESPACES.contains(namespace) || router == null)
-+        {
-+            logger.warn(String.format("Invalid REST root namespace: %s", namespace));
-+            return Logging.Exit(logger, this, false);
-+        }
-+
-+        if(rootRouters.putIfAbsent(namespace, router) != null)
-+        {
-+            logger.warn(String.format("REST root namespace already registered: %s", namespace));
-+            return Logging.Exit(logger, this, false);
-+        }
-+
-+        try
-+        {
-+            HttpContext context = addRootContext(namespace);
-+            if(context != null) rootContexts.put(namespace, context);
-+        }
-+        catch(IllegalArgumentException e)   // HttpServer: path already bound by another handler
-+        {
-+            rootRouters.remove(namespace);
-+            logger.error(String.format("Unable to bind REST root namespace: %s", namespace), e);
-+            return Logging.Exit(logger, this, false);
-+        }
-+
-+        logger.debug(String.format("Registered REST root namespace: %s (%s)", namespace, router));
-+        return Logging.Exit(logger, this, true);
-+    }
-+
-+    /**
-+     * Unregisters a root router previously registered with
-+     * {@link #registerRootRouter(String, RESTRootRouter)} and removes its HTTP
-+     * context.
-+     *
-+     * @param namespace The namespace to unregister.
-+     *
-+     * @return {@code true} if a router was unregistered, {@code false}
-+     *         otherwise.
-+     */
-+    public boolean unregisterRootRouter(final String namespace)
-+    {
-+        Logging.Entry(logger, this, namespace);
-+        HttpContext context = (namespace != null) ? rootContexts.remove(namespace) : null;
-+        if(context != null) removeRootContext(context);
-+        return Logging.Exit(logger, this, namespace != null && rootRouters.remove(namespace) != null);
-+    }
-+
-+    /**
-+     * Binds the HTTP context for a root namespace. Kept separate so that
-+     * tests can stub the server binding.
-+     *
-+     * @param namespace The root namespace.
-+     *
-+     * @return The bound context.
-+     */
-+    protected HttpContext addRootContext(final String namespace)
-+    {
-+        return addContext(ROOT_CONTEXT_PREFIX + namespace);
-+    }
-+
-+    /**
-+     * Removes the HTTP context of a root namespace. Kept separate so that
-+     * tests can stub the server binding.
-+     *
-+     * @param httpContext The context to remove.
-+     */
-+    protected void removeRootContext(final HttpContext httpContext)
-+    {
-+        removeContext(httpContext);
-+    }
-+
-     /**
-      * Registers a domain sub-router for a session-scoped namespace.
 diff --git a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
 new file mode 100644
-index 00000000..fb99893b
+index 00000000..56b1945e
 --- /dev/null
 +++ b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
 @@ -0,0 +1,494 @@
@@ -924,7 +712,7 @@ index 00000000..fb99893b
 +
 +    private void dispatch(final Call c, final String... segments) throws Throwable
 +    {
-+        facade.handle(c.exchange, segments);
++        facade.handle(c.exchange, null, segments);
 +    }
 +
 +    private File file(final String name, final String content) throws Exception
@@ -1318,171 +1106,6 @@ index 00000000..fb99893b
 +        return s.replace("\\", "\\\\").replace("\"", "\\\"");
 +    }
 +}
-diff --git a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/RESTModuleImplRootRouterTest.java b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/RESTModuleImplRootRouterTest.java
-new file mode 100644
-index 00000000..e8be9391
---- /dev/null
-+++ b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/RESTModuleImplRootRouterTest.java
-@@ -0,0 +1,81 @@
-+package io.github.eipx.remoteagent.modules.core;
-+
-+import static org.junit.Assert.*;
-+import static org.mockito.Mockito.mock;
-+
-+import org.junit.Before;
-+import org.junit.Test;
-+
-+import com.sun.net.httpserver.HttpContext;
-+import io.github.eipx.remoteagent.rest.RESTRootRouter;
-+
-+/**
-+ * Unit tests for the root-namespace registry of {@link RESTModuleImpl}. The
-+ * HTTP context binding is stubbed through the protected hooks so that no
-+ * server is needed.
-+ */
-+public class RESTModuleImplRootRouterTest
-+{
-+    private RESTModuleImpl module;
-+    private final RESTRootRouter router = (exchange, segments) -> {};
-+
-+    @Before
-+    public void setUp()
-+    {
-+        final HttpContext context = mock(HttpContext.class);
-+        module = new RESTModuleImpl()
-+        {
-+            @Override protected HttpContext addRootContext(final String namespace) { return context; }
-+            @Override protected void removeRootContext(final HttpContext httpContext) { /* no server in tests */ }
-+        };
-+    }
-+
-+    @Test
-+    public void registersValidNamespace()
-+    {
-+        assertTrue(module.registerRootRouter("fs", router));
-+    }
-+
-+    @Test
-+    public void rejectsReservedNamespaces()
-+    {
-+        assertFalse(module.registerRootRouter("sessions", router));
-+        assertFalse(module.registerRootRouter("admin", router));
-+    }
-+
-+    @Test
-+    public void rejectsMalformedNamespaces()
-+    {
-+        assertFalse(module.registerRootRouter(null, router));
-+        assertFalse(module.registerRootRouter("", router));
-+        assertFalse(module.registerRootRouter("a/b", router));
-+        assertFalse(module.registerRootRouter("*", router));
-+    }
-+
-+    @Test
-+    public void rejectsNullRouter()
-+    {
-+        assertFalse(module.registerRootRouter("fs", null));
-+    }
-+
-+    @Test
-+    public void rejectsDuplicateRegistration()
-+    {
-+        assertTrue(module.registerRootRouter("fs", router));
-+        assertFalse(module.registerRootRouter("fs", router));
-+    }
-+
-+    @Test
-+    public void unregisterFreesTheNamespace()
-+    {
-+        assertTrue(module.registerRootRouter("fs", router));
-+        assertTrue(module.unregisterRootRouter("fs"));
-+        assertTrue(module.registerRootRouter("fs", router));
-+    }
-+
-+    @Test
-+    public void unregisterUnknownReturnsFalse()
-+    {
-+        assertFalse(module.unregisterRootRouter("never-registered"));
-+    }
-+}
-diff --git a/core/src/main/java/io/github/eipx/remoteagent/rest/RESTRootRouter.java b/core/src/main/java/io/github/eipx/remoteagent/rest/RESTRootRouter.java
-new file mode 100644
-index 00000000..79232f3e
---- /dev/null
-+++ b/core/src/main/java/io/github/eipx/remoteagent/rest/RESTRootRouter.java
-@@ -0,0 +1,32 @@
-+package io.github.eipx.remoteagent.rest;
-+
-+import com.sun.net.httpserver.HttpExchange;
-+
-+/**
-+ * A domain-level request handler registered under a root namespace of the
-+ * REST endpoint ({@code /agent/{namespace}/...}).
-+ * <p>
-+ * Unlike {@link RESTSubRouter}, no session is resolved before delegation:
-+ * this is for modules whose operations are not owned by a session (for
-+ * example the file system module). The core REST module binds
-+ * {@code /agent/{namespace}} as its own HTTP context and delegates every
-+ * request under it with the path segments <strong>relative to the
-+ * namespace</strong>.
-+ *
-+ * @see io.github.eipx.remoteagent.rest.RESTSubRouter
-+ * @see io.github.eipx.remoteagent.rest.RESTRouter
-+ */
-+@FunctionalInterface
-+public interface RESTRootRouter
-+{
-+    /**
-+     * Handles a request routed to this namespace.
-+     *
-+     * @param exchange The HTTP exchange.
-+     * @param segments The path segments relative to this namespace (may be
-+     *                 empty, never {@code null}).
-+     *
-+     * @throws Throwable
-+     */
-+    void handle(HttpExchange exchange, String[] segments) throws Throwable;
-+}
-diff --git a/core/src/main/java/io/github/eipx/remoteagent/rest/RESTUtil.java b/core/src/main/java/io/github/eipx/remoteagent/rest/RESTUtil.java
-index ae2e51a6..b9734843 100644
---- a/core/src/main/java/io/github/eipx/remoteagent/rest/RESTUtil.java
-+++ b/core/src/main/java/io/github/eipx/remoteagent/rest/RESTUtil.java
-@@ -207,5 +207,8 @@ public class RESTUtil {
-         try
-         {
--            result = HTTPUtil.parseURLParameters(exchange.getRequestURI().getQuery());
-+            // getQuery() is already percent-decoded by java.net.URI; decoding it again in
-+            // parseURLParameters corrupts '+' and '%' in values (e.g. file paths) and
-+            // splits on an encoded '&'. The raw query is decoded exactly once.
-+            result = HTTPUtil.parseURLParameters(exchange.getRequestURI().getRawQuery());
-         }
-         catch(IOException ioe)
-@@ -280,3 +283,25 @@ public class RESTUtil {
-         exchange.getResponseBody().close();
-     }
-+
-+    /**
-+     * Sends raw bytes with the given content type. A {@code null} payload is
-+     * treated as zero-length, and an empty payload is sent with no body
-+     * ({@code -1}) rather than a zero length, which the JDK server would treat
-+     * as "chunked, unknown length". Callers that want {@code 204} should use
-+     * {@link #sendNoContent} instead.
-+     *
-+     * @param exchange    The HTTP exchange on which to send the response.
-+     * @param statusCode  The HTTP status code.
-+     * @param bytes       The payload, or {@code null}.
-+     * @param contentType The {@code Content-Type} header value.
-+     * @throws IOException
-+     */
-+    public static void sendBinaryResponse(final HttpExchange exchange, final int statusCode,
-+                                          final byte[] bytes, final String contentType) throws IOException
-+    {
-+        byte[] body = (bytes != null) ? bytes : new byte[0];
-+        exchange.getResponseHeaders().set("Content-Type", contentType);
-+        exchange.sendResponseHeaders(statusCode, body.length == 0 ? -1 : body.length);
-+        try(OutputStream os = exchange.getResponseBody()) { os.write(body); }
-+    }
- }
 diff --git a/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java b/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java
 index cf846f78..e2b539c0 100644
 --- a/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java
@@ -1779,7 +1402,7 @@ index 43d4a649..4978b53f 100644
  | `directoryExists` | `boolean directoryExists(String path)` | Checks if a directory exists |
 diff --git a/docs/modules/FSRESTModuleImpl.md b/docs/modules/FSRESTModuleImpl.md
 new file mode 100644
-index 00000000..5f3c3d0e
+index 00000000..33229f94
 --- /dev/null
 +++ b/docs/modules/FSRESTModuleImpl.md
 @@ -0,0 +1,122 @@
@@ -1789,7 +1412,7 @@ index 00000000..5f3c3d0e
 +
 +- **Package**: `io.github.eipx.remoteagent.modules.core.FSRESTModuleImpl`
 +- **Extends**: `AbstractStoppableModule`
-+- **Implements**: `BaseModule`, `RESTRootRouter`
++- **Implements**: `BaseModule`, `RESTNamespaceHandler`
 +- **Type**: <span class='badge-core'>Core</span>
 +- **REST Namespace**: `/agent/fs`
 +- **Session Required**: <span class='badge-no'>NO</span>
@@ -1801,8 +1424,8 @@ index 00000000..5f3c3d0e
 +File system operations are not owned by a session — `FSModuleImpl` extends the
 +plain RPC base class, and none of its SOAP operations take or resolve a
 +session — so this module registers the **root** namespace `fs` on
-+[RESTModuleImpl](/modules/RESTModuleImpl) via `registerRootRouter("fs", this)`
-+rather than a session-scoped sub-router. The core REST module binds `/agent/fs`
++[RESTModuleImpl](/modules/RESTModuleImpl) via `registerNamespace("fs", this, false)`
++with `requireSession` false: the core binds `/agent/fs` as its own HTTP context and passes no session. The core REST module binds `/agent/fs`
 +as its own HTTP context and delegates every request under it to this module,
 +which invokes the public methods of [FSModuleImpl](/modules/FSModuleImpl) — the
 +same domain logic used by the SOAP (JAX-WS) entry point.
@@ -1894,7 +1517,7 @@ index 00000000..5f3c3d0e
 +
 +| Component | Description |
 +|---|---|
-+| `RESTRootRouter` | Interface implemented to receive root-namespace requests (no session) |
++| `RESTNamespaceHandler` | Interface implemented to receive requests for a registered namespace (session is `null` here) |
 +| `RESTRouter` | Shared route/dispatch utility (`Route<Void>` table) |
 +| `FSModuleImpl` | Public domain methods invoked by the handlers |
 +| `RESTUtil` | Query parsing, JSON parsing, JSON/binary response helpers |
@@ -1933,48 +1556,3 @@ index 6422d127..d3d5a339 100644
 +Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;core.ProcessModuleImpl;core.RESTModuleImpl;
  
  # Optional: enable only on hosts serving the interactive docs page, so the REST
-diff --git a/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java b/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
-index bf3d59e3..595e204a 100644
---- a/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
-+++ b/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
-@@ -2,5 +2,4 @@ package io.github.eipx.remoteagent.modules.link;
- 
- import java.io.IOException;
--import java.io.OutputStream;
- import java.util.*;
- 
-@@ -505,5 +504,5 @@ public class LinkRESTModuleImpl extends AbstractStoppableModule implements BaseMo
- 				exchange.getResponseHeaders().set(HEADER_LINK_ENDPOINT, IOUtil.byteArrayToString(result[2]));
- 
--			sendBinaryResponse(exchange, 200, result[1]);
-+			RESTUtil.sendBinaryResponse(exchange, 200, result[1], CONTENT_TYPE_LINK);
- 		}
- 
-@@ -679,5 +678,5 @@ public class LinkRESTModuleImpl extends AbstractStoppableModule implements BaseMo
- 				exchange.getResponseHeaders().set(HEADER_RETURN_CODE, IOUtil.byteArrayToString(result[1]));
- 
--			sendBinaryResponse(exchange, 200, result[0]);
-+			RESTUtil.sendBinaryResponse(exchange, 200, result[0], CONTENT_TYPE_LINK);
- 		}
- 
-@@ -685,20 +684,4 @@ public class LinkRESTModuleImpl extends AbstractStoppableModule implements BaseMo
- 	}
- 
--	/**
--	 * Sends raw bytes as an {@code application/octet-stream} response.
--	 * A {@code null} payload is treated as zero-length (callers that want
--	 * {@code 204} should use {@link RESTUtil#sendNoContent} instead).
--	 */
--	private static void sendBinaryResponse(final HttpExchange exchange, final int statusCode, final byte[] bytes) throws IOException
--	{
--		final byte[] body = (bytes != null) ? bytes : new byte[0];
--		exchange.getResponseHeaders().set("Content-Type", CONTENT_TYPE_LINK);
--		exchange.sendResponseHeaders(statusCode, body.length);
--		try(final OutputStream os = exchange.getResponseBody())
--		{
--			os.write(body);
--		}
--	}
--
- 	/**
- 	 * Returns the given array, or an empty array when {@code null}.

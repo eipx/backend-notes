@@ -6,6 +6,13 @@ point beside its SOAP (JAX-WS) one. This one does the same for the file-system m
 interesting part is that the obvious move — copy the Link pattern — would be wrong. Identifiers
 are illustrative.
 
+> **Revised the same day, after [note 17](17-rest-namespace-registration.md).** The first version
+> of this design added a second handler interface (`RESTRootRouter`) beside the Link facade's
+> `RESTSubRouter`. Note 17 explains why that was the wrong shape and unifies both into one
+> `RESTNamespaceHandler` and one `registerNamespace(name, handler, requireSession)` call, mirroring
+> the SOAP side's `addEndpoint(..., requireSession)`. The code below is the unified version; the
+> design decisions are unchanged.
+
 ## What exists
 
 - The agent's REST core (`RESTModuleImpl`) binds two HTTP contexts on the shared server,
@@ -28,8 +35,8 @@ are illustrative.
 **1. No session.** Mounting file operations under `/agent/sessions/{token}/fs/...` would force
 every client to open a session it does not need, and would invent ownership where the domain
 has none. The namespace must be root-level: `/agent/fs/...`. That needs one small core
-addition — a *root router* registry beside the session sub-router registry — which binds
-`/agent/{namespace}` as its own HTTP context. Because the core strips the bound context before
+addition — the namespace registry gains a `requireSession` flag, and a namespace registered
+without one is bound as its own HTTP context at `/agent/{namespace}`. Because the core strips the bound context before
 splitting path segments, handlers see clean segments; and because the new context is handled
 by the same `handle()` method, the request-forwarding header (`X-Forward-To`) and the 500
 catch-all cover it for free. **No session-explicit overloads, and no change to `FSModuleImpl`
@@ -81,25 +88,35 @@ interface:
 
 ## The change, file by file
 
-### 1. `rest/RESTRootRouter.java` — new
+### 1. `rest/RESTNamespaceHandler.java` — one handler type for every REST module
 
 ```java
 package io.github.eipx.remoteagent.rest;
 
 import com.sun.net.httpserver.HttpExchange;
+import io.github.eipx.remoteagent.http.Session;
 
 /**
- * A domain-level request handler registered under a root namespace of the
- * REST endpoint ({@code /agent/{namespace}/...}). Unlike {@link RESTSubRouter}
- * no session is resolved: this is for modules whose operations are not owned
- * by a session (e.g. the file-system module).
+ * A domain module's REST entry point, registered under a namespace of the
+ * shared REST endpoint with
+ * {@code RESTModuleImpl.registerNamespace(namespace, handler, requireSession)}
+ * — the REST counterpart of {@code SOAPRPC.addEndpoint(implementor, path,
+ * requireSession)}. With {@code requireSession} the namespace is mounted under
+ * {@code /agent/sessions/{sessionToken}/{namespace}/...} and the resolved
+ * {@link Session} is passed (never {@code null}); without it the namespace is
+ * bound as its own HTTP context, {@code /agent/{namespace}/...}, and
+ * {@code session} is {@code null}. {@code segments} are relative to the
+ * namespace in both cases.
  */
 @FunctionalInterface
-public interface RESTRootRouter
+public interface RESTNamespaceHandler
 {
-    void handle(HttpExchange exchange, String[] segments) throws Throwable;
+    void handle(HttpExchange exchange, Session session, String[] segments) throws Throwable;
 }
 ```
+
+This replaces the Link facade's `RESTSubRouter` (same signature, so its handler body is
+unchanged) and the `RESTRootRouter` the first draft of this note proposed.
 
 ### 2. `rest/RESTUtil.java` — fix double decoding, add a binary sender
 
@@ -135,59 +152,56 @@ public interface RESTRootRouter
 +    protected void removeContext(HttpContext httpContext)
 ```
 
-### 4. `modules/core/RESTModuleImpl.java` — root namespace registry
+### 4. `modules/core/RESTModuleImpl.java` — one namespace registry for both kinds
+
+The full code is in [note 17](17-rest-namespace-registration.md); the shape:
 
 ```java
-    /** Prefix under which root namespaces are bound: {@code /agent/{namespace}}. */
+    /** Prefix under which namespaces registered without a session are bound: {@code /agent/{namespace}}. */
     public static final String ROOT_CONTEXT_PREFIX = "/agent/";
 
-    private static final Set<String> RESERVED_ROOT_NAMESPACES =
-            new HashSet<String>(Arrays.asList("sessions", "admin"));
+    /** Names the core uses itself: processes under a session; sessions and admin at the root. */
+    private static final Set<String> RESERVED_SESSION_NAMESPACES = new HashSet<String>(Collections.singletonList("processes"));
+    private static final Set<String> RESERVED_ROOT_NAMESPACES    = new HashSet<String>(Arrays.asList("sessions", "admin"));
 
-    private final ConcurrentMap<String, RESTRootRouter> rootRouters  = new ConcurrentHashMap<String, RESTRootRouter>();
-    private final ConcurrentMap<String, HttpContext>    rootContexts = new ConcurrentHashMap<String, HttpContext>();
-
-    /**
-     * Registers a root namespace, binding {@code /agent/{namespace}} on the shared
-     * HTTP server. Returns {@code false} when the namespace is invalid, reserved,
-     * already registered, or already bound by another handler.
-     */
-    public boolean registerRootRouter(final String namespace, final RESTRootRouter router)
+    /** A registered namespace: handler, whether a session is required, bound context if any. */
+    private static final class Mount
     {
-        Logging.Entry(logger, this, namespace, router);
-
-        if(namespace == null || namespace.isEmpty() || namespace.contains("/") || "*".equals(namespace)
-                || RESERVED_ROOT_NAMESPACES.contains(namespace) || router == null)
-        {
-            logger.warn(String.format("Invalid REST root namespace: %s", namespace));
-            return Logging.Exit(logger, this, false);
-        }
-        if(rootRouters.putIfAbsent(namespace, router) != null)
-        {
-            logger.warn(String.format("REST root namespace already registered: %s", namespace));
-            return Logging.Exit(logger, this, false);
-        }
-        try
-        {
-            rootContexts.put(namespace, addContext(ROOT_CONTEXT_PREFIX + namespace));
-        }
-        catch(final IllegalArgumentException e)   // HttpServer: path already bound
-        {
-            rootRouters.remove(namespace);
-            logger.error(String.format("Unable to bind REST root namespace: %s", namespace), e);
-            return Logging.Exit(logger, this, false);
-        }
-        return Logging.Exit(logger, this, true);
+        final RESTNamespaceHandler handler;
+        final boolean requireSession;
+        volatile HttpContext context;
+        Mount(final RESTNamespaceHandler handler, final boolean requireSession) { this.handler = handler; this.requireSession = requireSession; }
     }
 
-    public boolean unregisterRootRouter(final String namespace)
+    private final ConcurrentMap<String, Mount> mounts = new ConcurrentHashMap<String, Mount>();
+
+    /** The REST counterpart of SOAPRPC.addEndpoint(implementor, path, requireSession). */
+    public boolean registerNamespace(final String namespace, final RESTNamespaceHandler handler, final boolean requireSession)
     {
-        Logging.Entry(logger, this, namespace);
-        final HttpContext context = rootContexts.remove(namespace);
-        if(context != null) removeContext(context);
-        return Logging.Exit(logger, this, rootRouters.remove(namespace) != null);
+        Set<String> reserved = requireSession ? RESERVED_SESSION_NAMESPACES : RESERVED_ROOT_NAMESPACES;
+        if(namespace == null || namespace.isEmpty() || namespace.contains("/") || "*".equals(namespace)
+                || reserved.contains(namespace) || handler == null) return false;          // (logged)
+        Mount mount = new Mount(handler, requireSession);
+        if(mounts.putIfAbsent(namespace, mount) != null) return false;                       // (logged)
+        if(!requireSession)
+        {
+            try { mount.context = addNamespaceContext(namespace); }                         // binds /agent/{namespace}
+            catch(IllegalArgumentException e) { mounts.remove(namespace); return false; }  // path already bound (logged)
+        }
+        return true;
+    }
+
+    public boolean unregisterNamespace(final String namespace)
+    {
+        Mount mount = (namespace != null) ? mounts.remove(namespace) : null;
+        if(mount != null && mount.context != null) removeNamespaceContext(mount.context);
+        return mount != null;
     }
 ```
+
+Session-scoped requests that miss the core routes look up `mounts.get(segments[1])` and delegate
+when `requireSession` is set; requests arriving on a namespace's own context look up the same map
+and delegate with a `null` session.
 
 In `handle()`, the two-way split on context path becomes three-way:
 
@@ -204,16 +218,16 @@ In `handle()`, the two-way split on context path becomes three-way:
                                    final String[] segments) throws Throwable
     {
         Logging.Entry(logger, this, exchange, contextPath, segments);
-        final RESTRootRouter router = rootRouters.get(contextPath.substring(ROOT_CONTEXT_PREFIX.length()));
-        if(router == null) RESTUtil.sendNotFound(exchange);
-        else               router.handle(exchange, segments);
+        Mount mount = (contextPath != null && contextPath.startsWith(ROOT_CONTEXT_PREFIX))
+                ? mounts.get(contextPath.substring(ROOT_CONTEXT_PREFIX.length())) : null;
+        if(mount == null || mount.requireSession) RESTUtil.sendNotFound(exchange);
+        else                                      mount.handler.handle(exchange, null, segments);
         Logging.Exit(logger, this);
     }
 ```
 
-`unload()` additionally removes any root context still registered, in case a dependent module
-was unloaded out of order. The class Javadoc gains one line: `/agent/fs/... — file-system
-module (if loaded)`.
+`unload()` unregisters every remaining mount, in case a dependent module was unloaded out of
+order. The class Javadoc gains one line: `/agent/fs/... — file-system module (if loaded)`.
 
 ### 5. `modules/core/FSRESTModuleImpl.java` — new
 
@@ -238,7 +252,8 @@ import io.github.eipx.remoteagent.logging.LogUtil;
 import io.github.eipx.remoteagent.logging.Logging;
 import io.github.eipx.remoteagent.modules.AbstractStoppableModule;
 import io.github.eipx.remoteagent.modules.ModuleManager;
-import io.github.eipx.remoteagent.rest.RESTRootRouter;
+import io.github.eipx.remoteagent.http.Session;
+import io.github.eipx.remoteagent.rest.RESTNamespaceHandler;
 import io.github.eipx.remoteagent.rest.RESTRouter;
 import io.github.eipx.remoteagent.rest.RESTRouter.Route;
 import io.github.eipx.remoteagent.rest.RESTUtil;
@@ -247,7 +262,7 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
  * REST entry point for the file-system (FS) module. File-system operations are
  * not owned by a session, so this module registers the root namespace
  * {@code /agent/fs} on {@link RESTModuleImpl} (see
- * {@link RESTModuleImpl#registerRootRouter}) and delegates every request to the
+ * {@link RESTModuleImpl#registerNamespace}) and delegates every request to the
  * public methods of {@link FSModuleImpl} — the same domain logic used by the
  * SOAP (JAX-WS) entry point. Paths travel URL-encoded in the {@code path} query
  * parameter and are interpreted exactly as SOAP interprets them.
@@ -271,7 +286,7 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
  * {@code maxFileSize}. I/O exceptions propagate to the core's 500 handler, as
  * they become faults on SOAP.
  */
-public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseModule, RESTRootRouter
+public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseModule, RESTNamespaceHandler
 {
 	public static final Logger logger = Logger.getLogger(FSRESTModuleImpl.class);
 
@@ -327,7 +342,7 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
 						restModuleImpl, fsModuleImpl));
 				return Logging.Exit(logger, this, false);
 			}
-			result = restModuleImpl.registerRootRouter(FS_NAMESPACE, this);
+			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, false);
 			if(!result) logger.error(String.format("Unable to register REST root namespace: %s", FS_NAMESPACE));
 		}
 		return Logging.Exit(logger, this, result);
@@ -337,16 +352,16 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
 	public boolean unload(final ModuleManager moduleManager)
 	{
 		Logging.Entry(logger, this, moduleManager);
-		if(restModuleImpl != null) restModuleImpl.unregisterRootRouter(FS_NAMESPACE);
+		if(restModuleImpl != null) restModuleImpl.unregisterNamespace(FS_NAMESPACE);
 		restModuleImpl = null;
 		fsModuleImpl = null;
 		return Logging.Exit(logger, this, super.unload(moduleManager));
 	}
 
-	// RESTRootRouter Members
+	// RESTNamespaceHandler Members
 
 	@Override
-	public void handle(final HttpExchange exchange, final String[] segments) throws Throwable
+	public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
 	{
 		Logging.Entry(logger, this, exchange, segments);
 		final String method = exchange.getRequestMethod().toUpperCase();
@@ -716,8 +731,10 @@ which is where the risk is.
 - routing: unknown sub-path → 404; `POST /files` → 405
 - query decoding: `path=%2Bx` resolves to `+x` (the raw-query fix)
 
-`RESTModuleImplRootRouterTest`: reserved names `sessions` and `admin` refused, duplicate
-refused, unregister frees the name.
+`RESTModuleImplNamespaceTest` (11 cases): both kinds register through the one API; a session-scoped
+namespace binds no context and a root one binds exactly one; `processes` is refused under a
+session and `sessions`/`admin` at the root; malformed names, null handler and duplicates across
+kinds are refused; unregistering frees the name for either kind and unbinds only what was bound.
 
 ### 8. Documentation and the interactive API page
 
@@ -788,13 +805,15 @@ URL should not pretend otherwise.
 
 ## The patch
 
-The complete change is beside this note as
-[`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch):
-a unified diff with two lines of context over 16 files (+1756/−26) — the router interface, the
-core registry, the facade, the two test classes, the shared binary sender, the raw-query fix, the
-module page, nine explorer cards and endpoint-map entries, route summary, configuration
-reference, the default module list, and the one-line correction to the file-system module's
-page.
+The complete change is beside this note as two patches, so each branch gets what it needs:
+[`17-rest-namespace-registration.patch`](17-rest-namespace-registration.patch) is the
+infrastructure (the unified handler and registry, the raw-query fix, the shared binary sender,
+the Link facade's one-line switch, the registry tests) and applies to the Link branch as a
+follow-up; [`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch)
+is this design (the facade, its 35 tests, the module page, nine explorer cards and endpoint-map
+entries, route summary, configuration reference, the default module list, and the one-line
+correction to the file-system module's page) and applies on top of it. Both are unified diffs
+with two lines of context.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
@@ -804,11 +823,12 @@ What was verified before publishing, and what was not:
 
 - Compiled with `javac` against the real project sources, with the third-party APIs (logging,
   JAX-WS annotations, JUnit) replaced by minimal stubs: zero errors across 146 classes.
-- The two test classes were executed against the real file-system module on a temporary
-  directory: 41 passed, 0 failed, 1 skipped — the unreadable-file case, which the host operating
-  system could not simulate. The test for a body delivered in small chunks is the one that would
-  have caught the first draft's single-read bug; the test for `+` and `%` in a path is the one
-  that exercises the raw-query fix end to end.
+- The tests were executed against the real file-system module on a temporary directory, together
+  with the registry tests and the Link facade's existing tests on the unified API: 70 passed,
+  0 failed, 1 skipped — the unreadable-file case, which the host operating system could not
+  simulate. The test for a body delivered in small chunks is the one that would have caught the
+  first draft's single-read bug; the test for `+` and `%` in a path is the one that exercises the
+  raw-query fix end to end.
 - Not done: a build through the project's own pipeline, and a run against a live agent. A
   smoke script against a running instance is the natural next step and can be strict for every
   route, since file operations are deterministic.
