@@ -1,0 +1,111 @@
+# Sanitized patch for design note 18: a fallback switch between two interfaces (the packaging).
+# Registers the new operator command: wrapper script, package spec, operator-console dialog,
+# access-control list. Unified diff, 3 lines of context, 4 files, +52/-0 (one new file).
+# Identifiers are illustrative and do not come from any public tree. Verification: the dialog
+# XML parses; the wrapper passes sh -n; applies cleanly to a private checkout (git apply --check).
+
+diff --git a/data/RCScmddlg.xml b/data/RCScmddlg.xml
+index 0000003..0000003 100644
+--- a/data/RCScmddlg.xml
++++ b/data/RCScmddlg.xml
+@@ -405,6 +405,22 @@
+         <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID6" FIELDTYPE="OPTIONAL" LABEL="LIVE(Value L) OR TEST(Value T) OR ALL(Value A, Default) -e" OPTION="-e" TYPE="TEXT"/>
+         <PARAMETER FIELDID="ID7" DEFAULTSELECTION="None" FIELDTYPE="OPTIONAL" LABEL="Preview the changes --preview" OPTION="--preview" TYPE="CHECKBOX"/>
+     </COMMAND>
++    <COMMAND APPLNAME="RCS" APPLOWNER="RCS" LABEL="RCS_HC_BRIDGE2gRPC_SaF_upd.sh" NAME="RCS_HC_BRIDGE2gRPC_SaF_upd.sh" OPTGROUP="RCS_Supportability" ROLE="NETOPS" RUNASUSER="rcs" TRACKED="false" TYPE="AGENT" CONFIRM="YES" MULTIZONE="NO" CONFIRMLABEL="This script will update enabled field in TB_SAF for the rules routing to the selected Hosted Connectivity interface (gRPC queues, BRIDGE shared queues or both): Enabled(-E) or Disabled(-D) for the orgcode6 DN passed .">
++        <HOSTNAME AUTOCOMPLETE="ALLHOSTS" AUTOFIELDSEP="," FIELDID="HOSTNAME" FIELDTYPE="MANDATORY" LABEL="Destination Host -H" OPTION="-H" TYPE="TEXT"/>
++        <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID0" FIELDTYPE="MANDATORY" LABEL="Receiver Orgcode(6 digit) or full dn -B" OPTION="-B" TYPE="TEXT"/>
++        <GROUP ALIGN="VERTICAL" FIELDID="ID1" FIELDTYPE="MANDATORY" LABEL="GRP1" OPTION="-" TYPE="FRAME">
++            <GROUP ALIGN="VERTICAL" FIELDID="ID2" FIELDTYPE="MANDATORY" LABEL="Enable(-E) or Disable(-D)" OPTION="-" TYPE="RADIO">
++                <PARAMETER FIELDID="ID3" FIELDTYPE="OPTIONAL" HIDEFIELDS="NONE" LABEL="Enable -E (Enable the rules of the selected HC interface)" OPTION="-E"/>
++                <PARAMETER FIELDID="ID3" FIELDTYPE="OPTIONAL" HIDEFIELDS="NONE" LABEL="Disable -D (Disable the rules of the selected HC interface)" OPTION="-D"/>
++            </GROUP>
++        </GROUP>
++        <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID4" FIELDTYPE="OPTIONAL" LABEL="HC interface: GRPC(Value grpc, Default) OR BRIDGE(Value bridge) OR ALL(Value all) -I" OPTION="-I" TYPE="TEXT"/>
++        <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID5" FIELDTYPE="OPTIONAL" LABEL="ServiceName -S" OPTION="-S" TYPE="TEXT"/>
++        <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID6" FIELDTYPE="OPTIONAL" LABEL="SAF Queue Name" OPTION="-N" TYPE="TEXT"/>
++        <PARAMETER AUTOCOMPLETE="NONE" AUTOFIELDSEP="," DEFAULTSELECTION="NONE" FIELDID="ID7" FIELDTYPE="OPTIONAL" LABEL="LIVE(Value L) OR TEST(Value T) OR ALL(Value A, Default) -e" OPTION="-e" TYPE="TEXT"/>
++        <PARAMETER FIELDID="ID8" DEFAULTSELECTION="None" FIELDTYPE="OPTIONAL" LABEL="Force even if a route is left without enabled rule --force" OPTION="--force" TYPE="CHECKBOX"/>
++        <PARAMETER FIELDID="ID9" DEFAULTSELECTION="None" FIELDTYPE="OPTIONAL" LABEL="Preview the changes --preview" OPTION="--preview" TYPE="CHECKBOX"/>
++    </COMMAND>
+     <COMMAND APPLNAME="RCS" APPLOWNER="RCS" LABEL="RCSGetRbac.sh" NAME="RCSGetRbac.sh" OPTGROUP="RCS_Report" ROLE="NETOPS" RUNASUSER="rcs" TRACKED="true" TYPE="AGENT">
+         <HOSTNAME AUTOCOMPLETE="ALLHOSTS" AUTOFIELDSEP="," FIELDID="HOSTNAME" FIELDTYPE="MANDATORY" LABEL="Destination Host -H" OPTION="-H" TYPE="TEXT"/>
+         <GROUP ALIGN="VERTICAL" FIELDID="ID0" FIELDTYPE="GROUP" LABEL="GRP1" OPTION="-" TYPE="HIDDEN">
+diff --git a/data/RCSaccesslist.dat b/data/RCSaccesslist.dat
+index 0000004..0000004 100644
+--- a/data/RCSaccesslist.dat
++++ b/data/RCSaccesslist.dat
+@@ -180,6 +180,14 @@ RCS_Hc2Basic_SAF_upd.sh:group:SUP:rx
+ RCS_Hc2Basic_SAF_upd.sh:group:SUP1:rx
+ RCS_Hc2Basic_SAF_upd.sh:group:SUP2:rx
+ RCS_Hc2Basic_SAF_upd.sh:group:L2:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:user_obj:rxac
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:OPS:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:OPS1:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:OPS2:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:SUP:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:SUP1:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:SUP2:rx
++RCS_HC_BRIDGE2gRPC_SaF_upd.sh:group:L2:rx
+ RCSGetRbac.sh:user_obj:rxac
+ RCSGetRbac.sh:group:OPS:rx
+ RCSGetRbac.sh:group:OPS1:rx
+diff --git a/release/rcs.spec b/release/rcs.spec
+index 0000005..0000005 100644
+--- a/release/rcs.spec
++++ b/release/rcs.spec
+@@ -132,6 +132,7 @@ cp %_sourcedir/scripts/RCSLoadFile.sh           ${RPM_BUILD_ROOT}/op
+ cp %_sourcedir/scripts/RCSLoadExtCodesets.sh    ${RPM_BUILD_ROOT}/opt/rcs/bin/
+ cp %_sourcedir/scripts/RCS_Hc2Basic_RT_upd.sh   ${RPM_BUILD_ROOT}/opt/rcs/bin/
+ cp %_sourcedir/scripts/RCS_Hc2Basic_SAF_upd.sh  ${RPM_BUILD_ROOT}/opt/rcs/bin/
++cp %_sourcedir/scripts/RCS_HC_BRIDGE2gRPC_SaF_upd.sh ${RPM_BUILD_ROOT}/opt/rcs/bin/
+ cp %_sourcedir/scripts/RCSGetRbac.sh            ${RPM_BUILD_ROOT}/opt/rcs/bin/
+ cp %_sourcedir/scripts/RCSGetSafQueue.sh        ${RPM_BUILD_ROOT}/opt/rcs/bin/
+ 
+@@ -235,6 +236,7 @@ echo /opt/rcs/bin/RCSLoadFile.sh +rx g=OPS g=OPS1 g=OPS2 +r g=L2
+ echo /opt/rcs/bin/RCSLoadExtCodesets.sh +rx g=OPS g=OPS1 g=OPS2 +r g=L2
+ echo /opt/rcs/bin/RCS_Hc2Basic_RT_upd.sh +rx u=console g=OPS g=OPS1 g=OPS2 g=SUP g=L2
+ echo /opt/rcs/bin/RCS_Hc2Basic_SAF_upd.sh +rx u=console g=OPS g=OPS1 g=OPS2 g=SUP g=L2
++echo /opt/rcs/bin/RCS_HC_BRIDGE2gRPC_SaF_upd.sh +rx u=console g=OPS g=OPS1 g=OPS2 g=SUP g=L2
+ echo /opt/rcs/bin/RCSGetRbac.sh +rx g=OPS g=OPS1 g=OPS2 g=SUP g=L2
+ echo /opt/rcs/bin/RCSGetSafQueue.sh +rx g=OPS g=OPS1 g=OPS2 g=L2 g=SUP
+ 
+@@ -362,6 +364,7 @@ echo /etc/opt/rcs/RCSconsoleaconfig.dat
+ %attr(0550,rcs,netsvcg) /opt/rcs/bin/RCSLoadExtCodesets.sh
+ %attr(0550,rcs,netsvcg) /opt/rcs/bin/RCS_Hc2Basic_RT_upd.sh
+ %attr(0550,rcs,netsvcg) /opt/rcs/bin/RCS_Hc2Basic_SAF_upd.sh
++%attr(0550,rcs,netsvcg) /opt/rcs/bin/RCS_HC_BRIDGE2gRPC_SaF_upd.sh
+ %attr(0550,rcs,netsvcg) /opt/rcs/bin/RCSGetRbac.sh
+ %attr(0550,rcs,netsvcg) /opt/rcs/bin/RCSGetSafQueue.sh
+ 
+diff --git a/scripts/RCS_HC_BRIDGE2gRPC_SaF_upd.sh b/scripts/RCS_HC_BRIDGE2gRPC_SaF_upd.sh
+new file mode 100644
+index 0000000..0000006
+--- /dev/null
++++ b/scripts/RCS_HC_BRIDGE2gRPC_SaF_upd.sh
+@@ -0,0 +1,25 @@
++#!/bin/sh
++
++#***************************************************************************
++# Name               : RCS_HC_BRIDGE2gRPC_SaF_upd.sh
++# Description        : Switch Hosted Connectivity SAF traffic between the gRPC and
++#                      the BRIDGE interfaces by enabling or disabling the SAF
++#                      rules routing to the queues of the selected interface.
++
++# Parameters:
++# -B,--orgcode            <orgcode or complete dn>   Receiver orgcode6 or complete DN as stored in database
++# -S,--service        <ServiceName>          Service Name
++# -N,--safqueue       <SAFQueueName>         SAF queue name(s), colon separated
++# -I,--interface      <grpc|bridge|all>        HC interface whose SAF rules are updated (default grpc)
++# -E,--enable                                Enable the SAF rules routing to the selected HC interface
++# -D,--disable                               Disable the SAF rules routing to the selected HC interface
++# -e,--env            <[L, T, A]>            Live(L) or Test(T) or All(A) for services
++# --force                                    Disable the rules even if a route is left without any enabled rule
++# --preview                                  Preview the action to be taken, no actual change will be performed
++#***************************************************************************
++
++##################
++#     Main
++##################
++
++/opt/rcs/bin/rcs command update-saf-bridge2grpc "$@"

@@ -1,0 +1,251 @@
+# Sanitized patch for design note 18: a fallback switch between two interfaces (the service).
+# Generalises the existing interface-switch command into one helper with a queue selector and
+# adds the new command (-I/--interface grpc|bridge|all, coverage check, --force). Unified diff,
+# 3 lines of context, 2 files, +177/-4.
+# Identifiers are illustrative and do not come from any public tree; the patch is for reading
+# alongside the note. Verification: both files compile (py_compile); applies cleanly to a
+# private checkout (git apply --check). No unit tests exist for the command being generalised;
+# not run against a database.
+
+diff --git a/routecfg/commands/cli.py b/routecfg/commands/cli.py
+index 0000001..0000001 100644
+--- a/routecfg/commands/cli.py
++++ b/routecfg/commands/cli.py
+@@ -639,10 +639,85 @@ def update_saf_hc2basic(ctx, orgcode, service, safqueue, enable, disable, env, previ
+         return response
+     except Exception as e:
+         error = format_error(e)
++
++
++
++
++@command.command('update-saf-bridge2grpc')
++@click.option('-B', '--orgcode', required=True,
++              help='Receiver orgcode6 or complete DN as stored in database')
++@click.option('-S', '--service',
++              help='Service name')
++@click.option('-N', '--safqueue',
++              help='SAF queue name(s), colon separated; replaces the selection '
++                   'made by --interface')
++@click.option('-I', '--interface',
++              type=click.Choice(['grpc', 'bridge', 'all']),
++              default='grpc', show_default=True,
++              help='Hosted Connectivity interface whose SAF rules are updated: '
++                   'grpc = the customer gRPC queues, bridge = the shared queues '
++                   '(hcshared*), all = both in one transaction')
++@click.option('-E', '--enable', is_flag=True,
++              cls=MutuallyExclusiveOption, mutually_exclusive=['disable'],
++              help='Enable the SAF rules routing to the selected HC interface')
++@click.option('-D', '--disable', is_flag=True,
++              cls=MutuallyExclusiveOption, mutually_exclusive=['enable'],
++              help='Disable the SAF rules routing to the selected HC interface')
++@click.option('-e', '--env',
++              type=click.Choice(['L', 'T', 'A']),
++              default='A', show_default=True,
++              help='Live(L) or Test(T) or All(A) for services')
++@click.option('--force', is_flag=True,
++              help='Disable the rules even if a route is left without any '
++                   'enabled rule')
++@click.option('--preview', is_flag=True,
++              help='If provided, preview the action to be taken')
++@click.option('--quiet', is_flag=True,
++              help='If provided, do not return affected rules')
++@click.pass_obj
++@logging.process_name('command-update-saf-bridge2grpc')
++@logging.record_cli_event
++def update_saf_bridge2grpc(ctx, orgcode, service, safqueue, interface, enable, disable,
++                         env, force, preview, quiet):
++    """
++    Switch Hosted Connectivity SAF traffic between the gRPC and the BRIDGE interfaces.
++    """
++    try:
++        check_inactive_dr(is_preview=preview)
++        if not enable and not disable:
++            raise INVALID_ARGUMENT('--enable or --disable must be provided.')
++        request= {'orgcode': orgcode,
++                  'enabled': enable,
++                  'interface': interface,
++                  'force': force,
++                  'return_affected_rules': not quiet}
++        if service is not None:
++            request['service_name'] = service
++        if safqueue is not None:
++            request['safqueue'] = safqueue
++        if env == 'L':
++            request['is_test'] = False
++        elif env == 'T':
++            request['is_test'] = True
++        cdb_session = CassandraConnector().connect()
++        response = saf.update_saf_bridge2grpc(cdb_session, request, preview)
++        if not quiet and "rules" in response:
++            logger.status(f'{len(response["rules"])} rules affected')
++            if response['rules']:
++                logger.status('Data after update of enabled flag: ')
++                CassandraModel().tables['TB_SAF'].print_rows(
++                    response['rules'],
++                    columns=['rank', 'receiver', 'org_dn', 'service_name', 'is_test',
++                             'safqueue', 'enabled'])
++        return response
++    except Exception as e:
++        error = format_error(e)
+         logger.error(error)
+         raise click.ClickException(error)
+ 
+ 
++
++
+ @command.command('schema-admin', hidden=True)
+ @click.option('-g', '--group',
+               cls=MutuallyExclusiveOption, mutually_exclusive=['schematype', 'namespace'],
+diff --git a/routecfg/server/saf.py b/routecfg/server/saf.py
+index 0000002..0000002 100644
+--- a/routecfg/server/saf.py
++++ b/routecfg/server/saf.py
+@@ -1,5 +1,6 @@
+ import logging
+ import copy
++import re
+ from routecfg.model.cassandra import CassandraModel
+ from routecfg.model.operation import OpCode, MODIFY
+ from routecfg.connectors.recorder import Recorder
+@@ -148,9 +149,72 @@ def open_output_channel(session, request):
+             raise INTERNAL(str(op.result))
+ 
+ 
+-def update_saf_hc2basic(session, request, preview):
++# Hosted Connectivity (HC) queue naming, see the provisioning requirements for the gRPC
++# interface:
++# - shared queues used by the BRIDGE interface: hcshared_{a|b|ab}
++# - customer queues used by the gRPC interface:
++#   <orgcode6>_hostedconn{a|b|ab}, suffixed with ~test for test
++HC_SHARED_QUEUE_PREFIX = 'hcshared'
++HC_GRPC_QUEUE_PATTERN = re.compile(r'^[a-z0-9]{6}_hostedconn(a|b|ab)(~test)?$',
++                                   re.IGNORECASE)
++
++
++def is_hc_shared_queue(safqueue):
++    return safqueue.startswith(HC_SHARED_QUEUE_PREFIX)
++
++
++def is_hc_grpc_queue(safqueue):
++    return HC_GRPC_QUEUE_PATTERN.match(safqueue) is not None
++
++
++def is_hc_queue(safqueue):
++    return is_hc_grpc_queue(safqueue) or is_hc_shared_queue(safqueue)
++
++
++# SAF rules selected for each HC interface named on the command line
++HC_INTERFACE_QUEUE_FILTERS = {
++    'grpc': is_hc_grpc_queue,
++    'bridge': is_hc_shared_queue,
++    'all': is_hc_queue,
++}
++
++
++def _routing_key(row):
++    return (row.org_dn, row.service_name, row.receiver,
++            row.sender, row.message_type)
++
++
++def _uncovered_routes(session, filter, disabled_rows):
+     """
+-    Switch SAF traffic from HC to Basic, and conversely from Basic to HC.
++    Routing keys left without any enabled TB_SAF rule once disabled_rows
++    are disabled. The rules of a customer on HC are chained by rank (gRPC
++    queue, shared queue, legacy queue); disabling the last enabled rule of
++    a chain leaves the receiver without a queue.
++    """
++    coverage_filter = {k: v for k, v in filter.items()
++                       if k not in ('safqueue', 'enabled')}
++    coverage_filter['enabled'] = True
++    disabled_pks = {(_routing_key(row), row.safqueue) for row in disabled_rows}
++    remaining = {_routing_key(row)
++                 for row in session.execute(Select('TB_SAF', where=coverage_filter))
++                 if (_routing_key(row), row.safqueue) not in disabled_pks}
++    uncovered = []
++    for row in disabled_rows:
++        key = _routing_key(row)
++        if key not in remaining and key not in uncovered:
++            uncovered.append(key)
++    return uncovered
++
++
++def _update_saf_enabled(session, request, preview, queue_filter,
++                        transaction_name, check_coverage=False):
++    """
++    Set the enabled flag of the TB_SAF rules selected by the request.
++
++    Without an explicit 'safqueue' list only the rules whose queue is
++    accepted by queue_filter are updated. With check_coverage a disable
++    request is refused, unless 'force' is set, when it would leave a route
++    without any enabled rule.
+     """
+     enabled = request.get('enabled', False)
+     orgcode = request['orgcode']
+@@ -172,7 +236,7 @@ def update_saf_hc2basic(session, request, preview):
+     rows = list(session.execute(Select('TB_SAF', where=filter)))
+     def filter_row(row):
+         if request.get('safqueue') is None:
+-            return row.safqueue.startswith('hcshared')
++            return queue_filter(row.safqueue)
+         else:
+             return True
+     def update_row(row):
+@@ -182,6 +246,16 @@ def update_saf_hc2basic(session, request, preview):
+     updated_rows = [update_row(row) for row in rows if filter_row(row)]
+     logger.status(f'Found {len(updated_rows)} SAF rules')
+     response = {'number_of_rules_matched': len(updated_rows)}
++    if check_coverage and not enabled and updated_rows:
++        uncovered = _uncovered_routes(session, filter, updated_rows)
++        if uncovered:
++            routes = ', '.join(f'{service_name}/{receiver}'
++                               for _, service_name, receiver, _, _ in uncovered)
++            message = f'No enabled SAF rule would remain for: {routes}'
++            if preview or request.get('force'):
++                logger.warning(message)
++            else:
++                raise INVALID_ARGUMENT(f'{message}. Use --force to disable anyway.')
+     return_affected_rules = request.get('return_affected_rules', False)
+     if preview:
+         if return_affected_rules:
+@@ -194,7 +268,7 @@ def update_saf_hc2basic(session, request, preview):
+         nacks = 0
+         if updated_rows:
+             TB_SAF = CassandraModel().tables['TB_SAF']
+-            transaction = make_transaction_info(request, 'UpdateSAFHC2Basic')
++            transaction = make_transaction_info(request, transaction_name)
+             recorder = Recorder(session)
+             recorder.cache_rows(TB_SAF, rows)
+             with Transaction(recorder,
+@@ -217,6 +291,30 @@ def update_saf_hc2basic(session, request, preview):
+         logger.status(f'Updated {acks} of {len(updated_rows)} SAF rules')
+     return response
+ 
++
++def update_saf_hc2basic(session, request, preview):
++    """
++    Switch SAF traffic from HC to Basic, and conversely from Basic to HC:
++    without an explicit queue list only the rules routing to the HC shared
++    queues are updated.
++    """
++    return _update_saf_enabled(session, request, preview,
++                               is_hc_shared_queue, 'UpdateSAFHC2Basic')
++
++
++def update_saf_bridge2grpc(session, request, preview):
++    """
++    Switch HC SAF traffic between the gRPC and the BRIDGE interfaces: without
++    an explicit queue list only the rules routing to the queues of the
++    requested HC interface ('grpc' by default, 'bridge' or 'all') are updated.
++    """
++    interface = request.get('interface', 'grpc')
++    if interface not in HC_INTERFACE_QUEUE_FILTERS:
++        raise INVALID_ARGUMENT(f'Unknown HC interface {interface}')
++    return _update_saf_enabled(session, request, preview,
++                               HC_INTERFACE_QUEUE_FILTERS[interface],
++                               'UpdateSAFBRIDGE2gRPC', check_coverage=True)
++
+ class Counters:
+     def __init__(self, entity=None, executed=False):
+         self.entity = entity # queue or channel
