@@ -817,12 +817,14 @@ The complete change is beside this note as two patches, so each branch gets what
 infrastructure (the unified handler and registry, the raw-query fix, the shared binary sender,
 the Link facade's one-line switch, the registry tests) and applies to the Link branch as a
 follow-up; [`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch)
-is this design (the facade, its 35 tests, the module page, nine explorer cards and endpoint-map
-entries, route summary, configuration reference, the default module list, and the one-line
-correction to the file-system module's page) and applies on top of it. A third,
-[`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch),
-applies on top of the second and switches the facade to a session-scoped namespace (see the
-follow-up section below). All three are unified diffs with two lines of context.
+is this design in its final, session-scoped form (the facade, its 37 tests, the module page, nine
+explorer cards and endpoint-map entries, route summary, configuration reference, the default module
+list, and the corrections to the file-system module's page) and applies on top of it. Every file of
+the facade is new, so the patch carries each one in full.
+[`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch)
+is the delta between the first published version of patch 16 and this one, for anyone who applied
+the first; it is not needed otherwise (see the follow-up section below). All are unified diffs with
+two lines of context.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
