@@ -812,19 +812,20 @@ URL should not pretend otherwise.
 
 ## The patch
 
-The complete change is beside this note as two patches, so each branch gets what it needs:
-[`17-rest-namespace-registration.patch`](17-rest-namespace-registration.patch) is the
-infrastructure (the unified handler and registry, the raw-query fix, the shared binary sender,
-the Link facade's one-line switch, the registry tests) and applies to the Link branch as a
-follow-up; [`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch)
-is this design in its final, session-scoped form (the facade, its 37 tests, the module page, nine
-explorer cards and endpoint-map entries, route summary, configuration reference, the default module
-list, and the corrections to the file-system module's page) and applies on top of it. Every file of
-the facade is new, so the patch carries each one in full.
+The complete change is beside this note as
+[`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch), a
+standalone patch against the branch that carries the Link facade of note 15: the infrastructure
+(the unified handler and registry, the raw-query fix, the shared binary sender, the Link facade's
+one-line switch, the registry tests) and this design in its final, session-scoped form (the facade,
+its 37 tests, the module page, nine explorer cards and endpoint-map entries, route summary,
+configuration reference, the default module list, and the corrections to the file-system module's
+page). Every file of the facade is new, so the patch carries each one in full. Two smaller patches
+sit beside it for readers who need only a part:
+[`17-rest-namespace-registration.patch`](17-rest-namespace-registration.patch) is the infrastructure
+alone, for the Link branch as a follow-up, and
 [`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch)
-is the delta between the first published version of patch 16 and this one, for anyone who applied
-the first; it is not needed otherwise (see the follow-up section below). All are unified diffs with
-two lines of context.
+is the delta between the first published version of the facade and the final one. All are unified
+diffs with two lines of context.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
