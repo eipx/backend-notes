@@ -52,6 +52,11 @@ method pairs disappear; `RESTRouter` keeps its name because it is now the only t
 It mirrors `addEndpoint(handler, path, requireSession)` exactly, which is also the argument that
 wins the review.
 
+> **Corrected 2026-10-29.** The file-system module's SOAP endpoint turned out to be published with
+> `requireSession = true` as well, so its facade now also registers with `true`; see the follow-up
+> in [note 16](16-rest-facade-for-a-stateless-module.md). The `false` kind stays in the registry,
+> tested, with no user yet.
+
 **Right — its own ticket, after.** Finish the SOAP symmetry: extract a `RESTServer` (the REST
 twin of the RPC server) that owns contexts, dispatch, the forwarder and the catch-all; make
 `AbstractRESTModule` a real base — constructor takes the namespace and `requireSession`,
@@ -282,6 +287,8 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
     public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
     // session is always null here and is not used
 ```
+
+_Corrected 2026-10-29: the file-system facade now registers with `true` too; see note 16's follow-up._
 
 Everything else in both facades — routes, handlers, status mapping — is untouched. The
 file-system design in note 16 is otherwise unchanged; its code blocks were updated to these

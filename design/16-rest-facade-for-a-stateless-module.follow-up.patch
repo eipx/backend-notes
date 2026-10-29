@@ -1,0 +1,572 @@
+# Sanitized follow-up patch for design note 16: the file-system facade registers its namespace
+# with a session, as the domain module's SOAP endpoint does. Applies on top of
+# 16-rest-facade-for-a-stateless-module.patch (which applies on top of 17-rest-namespace-registration.patch).
+# Identifiers are renamed consistently (package root, product and module names), so the paths will
+# not match any public tree; the patch is for reading alongside the note. Unified diff, 2 lines of
+# context, 8 files, +174/-92.
+# Verification: compiled with javac against the real project sources (zero errors; third-party APIs
+# stubbed for the compile); the facade's tests (35, plus 2 new registration tests), the registry
+# tests (11) and the Link facade's tests (25) were executed: 72 passed, 0 failed, 1 skipped (an
+# unreadable-file case the host OS cannot simulate). Not built or run through the project's own
+# build pipeline.
+
+diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
+index b02458a0..3d7f15c2 100644
+--- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
++++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
+@@ -26,8 +26,10 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
+ /**
+  * This class implements the REST entry point for the file system (FS)
+- * module. File system operations are not owned by a session, so this module
+- * registers the root namespace {@code "fs"} on {@link RESTModuleImpl} via
++ * module. The SOAP endpoint of {@link FSModuleImpl} is published with
++ * {@code requireSession = true}, so the REST namespace {@code "fs"} is
++ * registered on {@link RESTModuleImpl} the same way, via
+  * {@link RESTModuleImpl#registerNamespace(String, RESTNamespaceHandler, boolean)} with
+- * {@code requireSession} false, and delegates every request to the
++ * {@code requireSession} true: both transports demand an open session, and
++ * neither uses it for anything else. This module delegates every request to the
+  * public methods of {@link FSModuleImpl} — the same domain logic used by the
+  * SOAP (JAX-WS) entry point. Paths travel URL-encoded in the {@code path}
+@@ -35,13 +37,13 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
+  *
+  * <pre>
+- * GET    /agent/fs/entries?path=                      fileExists / directoryExists / fileSize
+- * GET    /agent/fs/files?path=[&offset=&length=]      readEntireFile / readFile
+- * PUT    /agent/fs/files?path=                        writeFile          (body: application/octet-stream)
+- * DELETE /agent/fs/files?path=                        removeFile
+- * POST   /agent/fs/files/copy                         copyFile           (body: {"source","destination"})
+- * POST   /agent/fs/files/move                         moveFile           (body: {"source","destination"})
+- * GET    /agent/fs/directories?path=                  listDirectory
+- * PUT    /agent/fs/directories?path=                  makeDirectory
+- * DELETE /agent/fs/directories?path=                  removeDirectory
++ * GET    /agent/sessions/{sessionToken}/fs/entries?path=                      fileExists / directoryExists / fileSize
++ * GET    /agent/sessions/{sessionToken}/fs/files?path=[&offset=&length=]      readEntireFile / readFile
++ * PUT    /agent/sessions/{sessionToken}/fs/files?path=                        writeFile          (body: application/octet-stream)
++ * DELETE /agent/sessions/{sessionToken}/fs/files?path=                        removeFile
++ * POST   /agent/sessions/{sessionToken}/fs/files/copy                         copyFile           (body: {"source","destination"})
++ * POST   /agent/sessions/{sessionToken}/fs/files/move                         moveFile           (body: {"source","destination"})
++ * GET    /agent/sessions/{sessionToken}/fs/directories?path=                  listDirectory
++ * PUT    /agent/sessions/{sessionToken}/fs/directories?path=                  makeDirectory
++ * DELETE /agent/sessions/{sessionToken}/fs/directories?path=                  removeDirectory
+  * </pre>
+  *
+@@ -72,5 +74,6 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 
+ 	/**
+-	 * Root REST namespace registered on {@link RESTModuleImpl}.
++	 * Session-scoped REST namespace registered on {@link RESTModuleImpl} and
++	 * mounted under {@code /agent/sessions/{sessionToken}/fs}.
+ 	 */
+ 	public static final String FS_NAMESPACE = "fs";
+@@ -103,14 +106,14 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 	 * {@code "fs"} namespace. Earlier entries take precedence over later ones.
+ 	 */
+-	private final List<Route<Void>> routes = Arrays.asList(
+-			new Route<Void>("GET",    new String[] {"entries"},        (x, c, s) -> handleStat(x)),
+-			new Route<Void>("GET",    new String[] {"files"},          (x, c, s) -> handleReadFile(x)),
+-			new Route<Void>("PUT",    new String[] {"files"},          (x, c, s) -> handleWriteFile(x)),
+-			new Route<Void>("DELETE", new String[] {"files"},          (x, c, s) -> handleRemoveFile(x)),
+-			new Route<Void>("POST",   new String[] {"files", "copy"},  (x, c, s) -> handleCopyFile(x)),
+-			new Route<Void>("POST",   new String[] {"files", "move"},  (x, c, s) -> handleMoveFile(x)),
+-			new Route<Void>("GET",    new String[] {"directories"},    (x, c, s) -> handleListDirectory(x)),
+-			new Route<Void>("PUT",    new String[] {"directories"},    (x, c, s) -> handleMakeDirectory(x)),
+-			new Route<Void>("DELETE", new String[] {"directories"},    (x, c, s) -> handleRemoveDirectory(x))
++	private final List<Route<Session>> routes = Arrays.asList(
++			new Route<Session>("GET",    new String[] {"entries"},        (x, c, s) -> handleStat(x)),
++			new Route<Session>("GET",    new String[] {"files"},          (x, c, s) -> handleReadFile(x)),
++			new Route<Session>("PUT",    new String[] {"files"},          (x, c, s) -> handleWriteFile(x)),
++			new Route<Session>("DELETE", new String[] {"files"},          (x, c, s) -> handleRemoveFile(x)),
++			new Route<Session>("POST",   new String[] {"files", "copy"},  (x, c, s) -> handleCopyFile(x, c)),
++			new Route<Session>("POST",   new String[] {"files", "move"},  (x, c, s) -> handleMoveFile(x)),
++			new Route<Session>("GET",    new String[] {"directories"},    (x, c, s) -> handleListDirectory(x)),
++			new Route<Session>("PUT",    new String[] {"directories"},    (x, c, s) -> handleMakeDirectory(x)),
++			new Route<Session>("DELETE", new String[] {"directories"},    (x, c, s) -> handleRemoveDirectory(x))
+ 	);
+ 
+@@ -147,6 +150,6 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 			}
+ 
+-			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, false);
+-			if(!result) logger.error(String.format("Unable to register REST root namespace: %s", FS_NAMESPACE));
++			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, true);
++			if(!result) logger.error(String.format("Unable to register REST namespace: %s", FS_NAMESPACE));
+ 		}
+ 
+@@ -172,5 +175,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 	 *
+ 	 * @param	exchange	The HTTP exchange.
+-	 * @param	session		Always {@code null}: the namespace is registered without a session.
++	 * @param	session		The session resolved by the core, never {@code null}; required for parity with the SOAP endpoint, not used by the file operations.
+ 	 * @param	segments	Path segments relative to the namespace.
+ 	 *
+@@ -180,8 +183,8 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 	public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
+ 	{
+-		Logging.Entry(logger, this, exchange, segments);
++		Logging.Entry(logger, this, exchange, session, segments);
+ 
+ 		final String method = exchange.getRequestMethod().toUpperCase();
+-		if(!RESTRouter.dispatch(exchange, method, segments, routes, null))
++		if(!RESTRouter.dispatch(exchange, method, segments, routes, session))
+ 			RESTUtil.sendNotFound(exchange);
+ 
+@@ -194,5 +197,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 		Logging.Entry(logger, this);
+ 
+-		String result = String.format("<label>REST namespace:</label> %s%s<br>", RESTModuleImpl.ROOT_CONTEXT_PREFIX, FS_NAMESPACE);
++		String result = String.format("<label>REST namespace:</label> %s/{sessionToken}/%s<br>", AbstractRESTModule.SESSION_CONTEXT_PATH, FS_NAMESPACE);
+ 
+ 		return Logging.Exit(logger, this, result);
+@@ -332,5 +335,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 	 * {@code 201} with the copy's {@code Location}.
+ 	 */
+-	protected void handleCopyFile(final HttpExchange exchange) throws Throwable
++	protected void handleCopyFile(final HttpExchange exchange, final Session session) throws Throwable
+ 	{
+ 		Logging.Entry(logger, this, exchange);
+@@ -344,6 +347,7 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
+ 		else
+ 		{
+-			exchange.getResponseHeaders().set("Location", String.format("%s%s/files?path=%s",
+-					RESTModuleImpl.ROOT_CONTEXT_PREFIX, FS_NAMESPACE, URLEncoder.encode(pair[1], "UTF-8")));
++			exchange.getResponseHeaders().set("Location", String.format("%s/%s/%s/files?path=%s",
++					AbstractRESTModule.SESSION_CONTEXT_PATH, RESTUtil.encodeToken(session.getID()),
++					FS_NAMESPACE, URLEncoder.encode(pair[1], "UTF-8")));
+ 			RESTUtil.sendJsonResponse(exchange, 201, success());
+ 		}
+diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
+index f9431d3f..012953b1 100644
+--- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
++++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
+@@ -61,5 +61,5 @@ import java.util.regex.Pattern;
+  *
+  *   .../{sessionToken}/link/...                                               Link module (if loaded; requireSession)
+- *   /agent/fs/...                                                             file system module (if loaded)
++ *   .../{sessionToken}/fs/...                                                file system module (if loaded; requireSession)
+  *
+  * The module also supports an opt-in {@code X-Forward-To} request-forwarding
+diff --git a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
+index 56b1945e..3cfeb3ae 100644
+--- a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
++++ b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
+@@ -27,9 +27,14 @@ import com.sun.net.httpserver.Headers;
+ import com.sun.net.httpserver.HttpExchange;
+ 
++import io.github.eipx.remoteagent.http.Session;
++import io.github.eipx.remoteagent.modules.ModuleManager;
++import io.github.eipx.remoteagent.rest.RESTUtil;
++
+ /**
+  * Unit tests for {@link FSRESTModuleImpl}. Only the {@link HttpExchange} is
+  * mocked; the handlers run against the real {@link FSModuleImpl} on a
+  * temporary directory, so the status mapping is proven against actual
+- * {@code java.io.File} behaviour rather than a stub.
++ * {@code java.io.File} behaviour rather than a stub. The two registration
++ * tests mock the module manager to pin the session-parity decision.
+  */
+ public class FSRESTModuleImplTest
+@@ -39,4 +44,5 @@ public class FSRESTModuleImplTest
+ 
+     private FSRESTModuleImpl facade;
++    private Session session;
+ 
+     /** Mocked exchange plus the stream its response body is written to. */
+@@ -52,4 +58,5 @@ public class FSRESTModuleImplTest
+     {
+         facade = new FSRESTModuleImpl();
++        session = new Session() {};
+         // Wire the real domain module directly — same package, bypass load()
+         Field f = FSRESTModuleImpl.class.getDeclaredField("fsModuleImpl");
+@@ -77,5 +84,5 @@ public class FSRESTModuleImplTest
+         ByteArrayOutputStream out = new ByteArrayOutputStream();
+         when(ex.getRequestMethod()).thenReturn(method);
+-        when(ex.getRequestURI()).thenReturn(new URI("/agent/fs/x" + (query == null ? "" : "?" + query)));
++        when(ex.getRequestURI()).thenReturn(new URI("/agent/sessions/" + RESTUtil.encodeToken(session.getID()) + "/fs/x" + (query == null ? "" : "?" + query)));
+         when(ex.getRequestHeaders()).thenReturn(requestHeaders);
+         when(ex.getResponseHeaders()).thenReturn(new Headers());
+@@ -99,5 +106,5 @@ public class FSRESTModuleImplTest
+     private void dispatch(final Call c, final String... segments) throws Throwable
+     {
+-        facade.handle(c.exchange, null, segments);
++        facade.handle(c.exchange, session, segments);
+     }
+ 
+@@ -336,5 +343,7 @@ public class FSRESTModuleImplTest
+         dispatch(c, "files", "copy");
+         assertEquals(201, status(c));
+-        assertNotNull(c.exchange.getResponseHeaders().getFirst("Location"));
++        String location = c.exchange.getResponseHeaders().getFirst("Location");
++        assertNotNull(location);
++        assertTrue(location, location.startsWith(AbstractRESTModule.SESSION_CONTEXT_PATH + "/" + RESTUtil.encodeToken(session.getID()) + "/fs/files?path="));
+         assertEquals("copy-me", new String(Files.readAllBytes(dst.toPath()), StandardCharsets.UTF_8));
+         assertTrue(src.exists());
+@@ -492,3 +501,34 @@ public class FSRESTModuleImplTest
+         return s.replace("\\", "\\\\").replace("\"", "\\\"");
+     }
++    // -- registration: session parity with the SOAP endpoint --
++
++    @Test
++    public void load_registersTheNamespaceWithASessionRequired() throws Throwable
++    {
++        ModuleManager manager = mock(ModuleManager.class);
++        RESTModuleImpl rest = mock(RESTModuleImpl.class);
++        FSRESTModuleImpl module = new FSRESTModuleImpl();
++        when(manager.getModule(RESTModuleImpl.class)).thenReturn(rest);
++        when(manager.getModule(FSModuleImpl.class)).thenReturn(new FSModuleImpl());
++        when(rest.registerNamespace(FSRESTModuleImpl.FS_NAMESPACE, module, true)).thenReturn(true);
++
++        assertTrue(module.load(manager));
++        verify(rest).registerNamespace(FSRESTModuleImpl.FS_NAMESPACE, module, true);
++
++        assertTrue(module.unload(manager));
++        verify(rest).unregisterNamespace(FSRESTModuleImpl.FS_NAMESPACE);
++    }
++
++    @Test
++    public void load_failsWhenTheNamespaceCannotBeRegistered() throws Throwable
++    {
++        ModuleManager manager = mock(ModuleManager.class);
++        RESTModuleImpl rest = mock(RESTModuleImpl.class);
++        FSRESTModuleImpl module = new FSRESTModuleImpl();
++        when(manager.getModule(RESTModuleImpl.class)).thenReturn(rest);
++        when(manager.getModule(FSModuleImpl.class)).thenReturn(new FSModuleImpl());
++        when(rest.registerNamespace(FSRESTModuleImpl.FS_NAMESPACE, module, true)).thenReturn(false);
++
++        assertFalse(module.load(manager));
++    }
+ }
+diff --git a/docs/api/REST_ENDPOINTS.md b/docs/api/REST_ENDPOINTS.md
+index 89b32ae3..11a0adc8 100644
+--- a/docs/api/REST_ENDPOINTS.md
++++ b/docs/api/REST_ENDPOINTS.md
+@@ -827,15 +827,15 @@ the LinkCall return code is reported via the <code>X-Link-Return-Code</code> respon
+ 
+ <p style="font-size:0.92em;color:#444;">File system operations are exposed by
+-<a href="#/modules/FSRESTModuleImpl">FSRESTModuleImpl</a> under the root namespace <code>/agent/fs</code>.
+-No session is required: file operations are not owned by a session, exactly as on the SOAP interface.
++<a href="#/modules/FSRESTModuleImpl">FSRESTModuleImpl</a> under the session-scoped namespace <code>/agent/sessions/{sessionToken}/fs</code>.
++A session is required, exactly as on the SOAP interface, whose endpoint is published behind the session filter: open one with <code>POST /agent/sessions</code> and the page fills the token in everywhere. File operations do not otherwise use the session.
+ Paths are passed URL-encoded in the <code>path</code> query parameter (the page encodes them for you).
+ File content travels as raw <code>application/octet-stream</code> bodies; everything else is JSON.
+-<code>GET /agent/fs/entries</code> never returns 404 — <code>"exists": false</code> is the answer.</p>
++<code>GET /agent/sessions/{sessionToken}/fs/entries</code> never returns 404 — <code>"exists": false</code> is the answer.</p>
+ 
+-<!-- GET /agent/fs/entries -->
++<!-- GET /agent/sessions/{sessionToken}/fs/entries -->
+ <div class="api-endpoint" data-id="fs-stat">
+   <div class="api-endpoint-header get">
+     <span class="method-badge get">GET</span>
+-    <span class="api-endpoint-path">/agent/fs/entries?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/entries?path=</span>
+     <span class="api-endpoint-desc">Existence, type and size</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -843,4 +843,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Reports whether the path exists, whether it is a <code>file</code> or <code>directory</code>, and for a readable file its <code>size</code>. SOAP equivalents: <code>fileExists</code>, <code>directoryExists</code>, <code>fileSize</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -855,9 +859,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- GET /agent/fs/files -->
++<!-- GET /agent/sessions/{sessionToken}/fs/files -->
+ <div class="api-endpoint" data-id="fs-read">
+   <div class="api-endpoint-header get">
+     <span class="method-badge get">GET</span>
+-    <span class="api-endpoint-path">/agent/fs/files?path=[&amp;offset=&amp;length=]</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/files?path=[&amp;offset=&amp;length=]</span>
+     <span class="api-endpoint-desc">Read a file</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -865,4 +869,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Returns the file content as <code>application/octet-stream</code>. Omit <code>length</code> for the whole file (<code>413</code> above <code>maxFileSize</code>); give <code>offset</code>/<code>length</code> to read a window. <code>404</code> if not a file, <code>403</code> if not readable. SOAP equivalents: <code>readEntireFile</code>, <code>readFile</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -886,9 +894,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- PUT /agent/fs/files -->
++<!-- PUT /agent/sessions/{sessionToken}/fs/files -->
+ <div class="api-endpoint" data-id="fs-write">
+   <div class="api-endpoint-header put">
+     <span class="method-badge put">PUT</span>
+-    <span class="api-endpoint-path">/agent/fs/files?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/files?path=</span>
+     <span class="api-endpoint-desc">Create or overwrite a file</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -896,4 +904,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Writes the request body as the complete file content (idempotent). <code>201</code> when the file did not exist, <code>200</code> when it was overwritten, <code>409</code> when the parent directory is missing, <code>403</code> when the existing file is not writable, <code>413</code> above <code>maxFileSize</code>. SOAP equivalent: <code>writeFile</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -911,9 +923,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- DELETE /agent/fs/files -->
++<!-- DELETE /agent/sessions/{sessionToken}/fs/files -->
+ <div class="api-endpoint" data-id="fs-delete">
+   <div class="api-endpoint-header delete">
+     <span class="method-badge delete">DELETE</span>
+-    <span class="api-endpoint-path">/agent/fs/files?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/files?path=</span>
+     <span class="api-endpoint-desc">Delete a file</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -921,4 +933,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Deletes a file. <code>404</code> if not a file, <code>403</code> if not writable. SOAP equivalent: <code>removeFile</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -932,9 +948,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- POST /agent/fs/files/copy -->
++<!-- POST /agent/sessions/{sessionToken}/fs/files/copy -->
+ <div class="api-endpoint" data-id="fs-copy">
+   <div class="api-endpoint-header post">
+     <span class="method-badge post">POST</span>
+-    <span class="api-endpoint-path">/agent/fs/files/copy</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/files/copy</span>
+     <span class="api-endpoint-desc">Copy a file</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -942,4 +958,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Copies <code>source</code> to <code>destination</code>. <code>201</code> with a <code>Location</code> header for the copy, <code>404</code> if the source is missing, <code>409</code> if the destination exists and is not writable. SOAP equivalent: <code>copyFile</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <table class="api-params-table">
+       <tr><th>Field</th><th>Type</th><th></th><th>Description</th></tr>
+@@ -958,9 +978,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- POST /agent/fs/files/move -->
++<!-- POST /agent/sessions/{sessionToken}/fs/files/move -->
+ <div class="api-endpoint" data-id="fs-move">
+   <div class="api-endpoint-header post">
+     <span class="method-badge post">POST</span>
+-    <span class="api-endpoint-path">/agent/fs/files/move</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/files/move</span>
+     <span class="api-endpoint-desc">Move or rename a file or directory</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -968,4 +988,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Moves <code>source</code> to <code>destination</code> (directories too, as the domain allows). <code>404</code> if the source is missing, <code>409</code> if the move cannot be applied. SOAP equivalent: <code>moveFile</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <table class="api-params-table">
+       <tr><th>Field</th><th>Type</th><th></th><th>Description</th></tr>
+@@ -984,9 +1008,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- GET /agent/fs/directories -->
++<!-- GET /agent/sessions/{sessionToken}/fs/directories -->
+ <div class="api-endpoint" data-id="fs-list">
+   <div class="api-endpoint-header get">
+     <span class="method-badge get">GET</span>
+-    <span class="api-endpoint-path">/agent/fs/directories?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/directories?path=</span>
+     <span class="api-endpoint-desc">List a directory</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -994,4 +1018,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Returns <code>{"path", "entries": [...]}</code>. <code>404</code> if the path is not a readable directory. SOAP equivalent: <code>listDirectory</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -1005,9 +1033,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- PUT /agent/fs/directories -->
++<!-- PUT /agent/sessions/{sessionToken}/fs/directories -->
+ <div class="api-endpoint" data-id="fs-mkdir">
+   <div class="api-endpoint-header put">
+     <span class="method-badge put">PUT</span>
+-    <span class="api-endpoint-path">/agent/fs/directories?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/directories?path=</span>
+     <span class="api-endpoint-desc">Create a directory</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -1015,4 +1043,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Creates the directory (idempotent): <code>201</code> when created, <code>200</code> when it already exists, <code>409</code> when the parent is missing or not writable. The parent must exist — the domain uses <code>mkdir</code>, not <code>mkdirs</code>. SOAP equivalent: <code>makeDirectory</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -1026,9 +1058,9 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+ </div>
+ 
+-<!-- DELETE /agent/fs/directories -->
++<!-- DELETE /agent/sessions/{sessionToken}/fs/directories -->
+ <div class="api-endpoint" data-id="fs-rmdir">
+   <div class="api-endpoint-header delete">
+     <span class="method-badge delete">DELETE</span>
+-    <span class="api-endpoint-path">/agent/fs/directories?path=</span>
++    <span class="api-endpoint-path">/agent/sessions/{sessionToken}/fs/directories?path=</span>
+     <span class="api-endpoint-desc">Remove an empty directory</span>
+     <span class="api-endpoint-chevron">▶</span>
+@@ -1036,4 +1068,8 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <div class="api-endpoint-body">
+     <p style="margin:0 0 12px;font-size:0.92em;color:#444;">Removes an empty directory. <code>404</code> if not a directory, <code>409</code> if it is not empty or not writable. SOAP equivalent: <code>removeDirectory</code>.</p>
++    <div class="api-field-group">
++      <label>sessionToken <span class="api-required">required</span></label>
++      <input type="text" data-param="sessionToken" placeholder="paste session token here">
++    </div>
+     <div class="api-field-group">
+       <label>path <span class="api-required">required</span></label>
+@@ -1070,13 +1106,13 @@ File content travels as raw <code>application/octet-stream</code> bodies; everyt
+   <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/sessions/{token}/link/attachments/{ht}/callbacks</code></td><td>LinkCallback request</td></tr>
+   <tr><td><span class="method-badge post" style="font-size:0.72em;min-width:50px;padding:2px 0;">POST</span></td><td><code>/agent/sessions/{token}/link/callbacks/{ct}</code></td><td>LinkCallback response</td></tr>
+-  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/fs/entries?path=</code></td><td>Existence, type and size</td></tr>
+-  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/fs/files?path=</code></td><td>Read file</td></tr>
+-  <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/fs/files?path=</code></td><td>Write file</td></tr>
+-  <tr><td><span class="method-badge delete" style="font-size:0.72em;min-width:50px;padding:2px 0;">DELETE</span></td><td><code>/agent/fs/files?path=</code></td><td>Delete file</td></tr>
+-  <tr><td><span class="method-badge post" style="font-size:0.72em;min-width:50px;padding:2px 0;">POST</span></td><td><code>/agent/fs/files/copy</code></td><td>Copy file</td></tr>
+-  <tr><td><span class="method-badge post" style="font-size:0.72em;min-width:50px;padding:2px 0;">POST</span></td><td><code>/agent/fs/files/move</code></td><td>Move file or directory</td></tr>
+-  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/fs/directories?path=</code></td><td>List directory</td></tr>
+-  <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/fs/directories?path=</code></td><td>Create directory</td></tr>
+-  <tr><td><span class="method-badge delete" style="font-size:0.72em;min-width:50px;padding:2px 0;">DELETE</span></td><td><code>/agent/fs/directories?path=</code></td><td>Remove directory</td></tr>
++  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/sessions/{token}/fs/entries?path=</code></td><td>Existence, type and size</td></tr>
++  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/sessions/{token}/fs/files?path=</code></td><td>Read file</td></tr>
++  <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/sessions/{token}/fs/files?path=</code></td><td>Write file</td></tr>
++  <tr><td><span class="method-badge delete" style="font-size:0.72em;min-width:50px;padding:2px 0;">DELETE</span></td><td><code>/agent/sessions/{token}/fs/files?path=</code></td><td>Delete file</td></tr>
++  <tr><td><span class="method-badge post" style="font-size:0.72em;min-width:50px;padding:2px 0;">POST</span></td><td><code>/agent/sessions/{token}/fs/files/copy</code></td><td>Copy file</td></tr>
++  <tr><td><span class="method-badge post" style="font-size:0.72em;min-width:50px;padding:2px 0;">POST</span></td><td><code>/agent/sessions/{token}/fs/files/move</code></td><td>Move file or directory</td></tr>
++  <tr><td><span class="method-badge get" style="font-size:0.72em;min-width:50px;padding:2px 0;">GET</span></td><td><code>/agent/sessions/{token}/fs/directories?path=</code></td><td>List directory</td></tr>
++  <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/sessions/{token}/fs/directories?path=</code></td><td>Create directory</td></tr>
++  <tr><td><span class="method-badge delete" style="font-size:0.72em;min-width:50px;padding:2px 0;">DELETE</span></td><td><code>/agent/sessions/{token}/fs/directories?path=</code></td><td>Remove directory</td></tr>
+   <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/admin/check_trace_level</code></td><td>Update log level</td></tr>
+ </table>
+diff --git a/docs/index.html b/docs/index.html
+index 265f237c..db736f13 100644
+--- a/docs/index.html
++++ b/docs/index.html
+@@ -259,13 +259,13 @@
+         'link-callback-req':  { method: 'GET',    path: '/agent/sessions/{sessionToken}/link/attachments/{handlerToken}/callbacks', optionalQuery: ['timeout'] },
+         'link-callback-resp': { method: 'POST',   path: '/agent/sessions/{sessionToken}/link/callbacks/{contextToken}', optionalQuery: ['returnCode'], contentType: 'application/octet-stream' },
+-        'fs-stat':   { method: 'GET',    path: '/agent/fs/entries',     queryTemplate: '?path={path}' },
+-        'fs-read':   { method: 'GET',    path: '/agent/fs/files',       queryTemplate: '?path={path}', optionalQuery: ['offset', 'length'] },
+-        'fs-write':  { method: 'PUT',    path: '/agent/fs/files',       queryTemplate: '?path={path}', contentType: 'application/octet-stream' },
+-        'fs-delete': { method: 'DELETE', path: '/agent/fs/files',       queryTemplate: '?path={path}' },
+-        'fs-copy':   { method: 'POST',   path: '/agent/fs/files/copy' },
+-        'fs-move':   { method: 'POST',   path: '/agent/fs/files/move' },
+-        'fs-list':   { method: 'GET',    path: '/agent/fs/directories', queryTemplate: '?path={path}' },
+-        'fs-mkdir':  { method: 'PUT',    path: '/agent/fs/directories', queryTemplate: '?path={path}' },
+-        'fs-rmdir':  { method: 'DELETE', path: '/agent/fs/directories', queryTemplate: '?path={path}' }
++        'fs-stat':   { method: 'GET',    path: '/agent/sessions/{sessionToken}/fs/entries',     queryTemplate: '?path={path}' },
++        'fs-read':   { method: 'GET',    path: '/agent/sessions/{sessionToken}/fs/files',       queryTemplate: '?path={path}', optionalQuery: ['offset', 'length'] },
++        'fs-write':  { method: 'PUT',    path: '/agent/sessions/{sessionToken}/fs/files',       queryTemplate: '?path={path}', contentType: 'application/octet-stream' },
++        'fs-delete': { method: 'DELETE', path: '/agent/sessions/{sessionToken}/fs/files',       queryTemplate: '?path={path}' },
++        'fs-copy':   { method: 'POST',   path: '/agent/sessions/{sessionToken}/fs/files/copy' },
++        'fs-move':   { method: 'POST',   path: '/agent/sessions/{sessionToken}/fs/files/move' },
++        'fs-list':   { method: 'GET',    path: '/agent/sessions/{sessionToken}/fs/directories', queryTemplate: '?path={path}' },
++        'fs-mkdir':  { method: 'PUT',    path: '/agent/sessions/{sessionToken}/fs/directories', queryTemplate: '?path={path}' },
++        'fs-rmdir':  { method: 'DELETE', path: '/agent/sessions/{sessionToken}/fs/directories', queryTemplate: '?path={path}' }
+       };
+ 
+diff --git a/docs/modules/FSModuleImpl.md b/docs/modules/FSModuleImpl.md
+index 4978b53f..89961d60 100644
+--- a/docs/modules/FSModuleImpl.md
++++ b/docs/modules/FSModuleImpl.md
+@@ -8,5 +8,5 @@
+ - **Type**: <span class='badge-core'>Core</span>
+ - **SOAP Endpoint**: `io.github.eipx.remoteagent.modules.core.FSModule`
+-- **Session Required**: <span class='badge-no'>NO</span>
++- **Session Required**: <span class='badge-yes'>YES</span>
+ - **Dependencies**: [RPCModule](/modules/RPCModule)
+ - **Annotations**: `@MTOM`, `@WebService`
+@@ -14,5 +14,5 @@
+ ## Description
+ 
+-The FSModuleImpl provides remote file system operations via SOAP. It exposes methods for directory and file manipulation backed by `java.io.File`. MTOM (Message Transmission Optimization Mechanism) is enabled for efficient binary transfer of file contents.
++The FSModuleImpl provides remote file system operations via SOAP. It exposes methods for directory and file manipulation backed by `java.io.File`. MTOM (Message Transmission Optimization Mechanism) is enabled for efficient binary transfer of file contents. The SOAP endpoint is published with `requireSession = true` (the constructor passes the flag to the RPC base class), so a call without a valid session cookie is rejected with `401`.
+ 
+ ## SOAP API
+diff --git a/docs/modules/FSRESTModuleImpl.md b/docs/modules/FSRESTModuleImpl.md
+index 33229f94..27258a88 100644
+--- a/docs/modules/FSRESTModuleImpl.md
++++ b/docs/modules/FSRESTModuleImpl.md
+@@ -7,6 +7,6 @@
+ - **Implements**: `BaseModule`, `RESTNamespaceHandler`
+ - **Type**: <span class='badge-core'>Core</span>
+-- **REST Namespace**: `/agent/fs`
+-- **Session Required**: <span class='badge-no'>NO</span>
++- **REST Namespace**: `/agent/sessions/{sessionToken}/fs`
++- **Session Required**: <span class='badge-yes'>YES</span>
+ - **Dependencies**: [RESTModuleImpl](/modules/RESTModuleImpl), [FSModuleImpl](/modules/FSModuleImpl)
+ 
+@@ -14,12 +14,14 @@
+ 
+ `FSRESTModuleImpl` is the REST entry point for the file system (FS) module.
+-File system operations are not owned by a session — `FSModuleImpl` extends the
+-plain RPC base class, and none of its SOAP operations take or resolve a
+-session — so this module registers the **root** namespace `fs` on
+-[RESTModuleImpl](/modules/RESTModuleImpl) via `registerNamespace("fs", this, false)`
+-with `requireSession` false: the core binds `/agent/fs` as its own HTTP context and passes no session. The core REST module binds `/agent/fs`
+-as its own HTTP context and delegates every request under it to this module,
+-which invokes the public methods of [FSModuleImpl](/modules/FSModuleImpl) — the
+-same domain logic used by the SOAP (JAX-WS) entry point.
++The SOAP endpoint of `FSModuleImpl` is published with `requireSession = true`
++(its constructor passes the flag to the RPC base class, so the SOAP context
++carries the session filter and a call without a valid session cookie gets `401`).
++The REST namespace is therefore registered the same way,
++`registerNamespace("fs", this, true)` on [RESTModuleImpl](/modules/RESTModuleImpl):
++the core mounts it under `/agent/sessions/{sessionToken}/fs`, resolves the session
++token once and delegates every request to this module together with the session,
++which the file operations do not otherwise use. The handlers invoke the public
++methods of [FSModuleImpl](/modules/FSModuleImpl), the same domain logic used by
++the SOAP (JAX-WS) entry point.
+ 
+ Paths travel URL-encoded in the `path` query parameter and are interpreted
+@@ -37,5 +39,5 @@ Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;
+ Remove `core.FSRESTModuleImpl` from the list to keep the SOAP interface only.
+ 
+-## REST Routes (`/agent/fs`)
++## REST Routes (`/agent/sessions/{sessionToken}/fs`)
+ 
+ | Method | Path | Handler | SOAP Equivalent | Description |
+@@ -110,5 +112,5 @@ as `fileExists` returns `false`.
+ | Component | Description |
+ |---|---|
+-| `RESTNamespaceHandler` | Interface implemented to receive requests for a registered namespace (session is `null` here) |
++| `RESTNamespaceHandler` | Interface implemented to receive requests for a registered namespace (the core resolves the session before delegating) |
+ | `RESTRouter` | Shared route/dispatch utility (`Route<Void>` table) |
+ | `FSModuleImpl` | Public domain methods invoked by the handlers |
+@@ -120,3 +122,3 @@ as `fileExists` returns `false`.
+ - **Message Format**: Raw bytes for file content; JSON control envelopes
+ - **Dependencies**: 2 (RESTModuleImpl, FSModuleImpl)
+-- **Session Events**: None (stateless)
++- **Session Scope**: required, for parity with the SOAP endpoint; not used by the operations
+diff --git a/install/agent.properties b/install/agent.properties
+index d3d5a339..25afb022 100644
+--- a/install/agent.properties
++++ b/install/agent.properties
+@@ -1,3 +1,3 @@
+-# core.FSRESTModuleImpl exposes the file system module under /agent/fs; remove it to keep SOAP only.
++# core.FSRESTModuleImpl exposes the file system module under /agent/sessions/{token}/fs (a session is required, as on SOAP); remove it to keep SOAP only.
+ # Optional: append link.LinkRESTModuleImpl; for Link REST endpoints (loads LinkModuleImpl automatically).
+ Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;core.ProcessModuleImpl;core.RESTModuleImpl;

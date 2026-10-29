@@ -13,6 +13,13 @@ are illustrative.
 > the SOAP side's `addEndpoint(..., requireSession)`. The code below is the unified version; the
 > design decisions are unchanged.
 
+> **Corrected 2026-10-29.** Decision 1 below ("No session") rested on the module page's statement
+> that the file-system module requires no session. The code says otherwise: the module's SOAP
+> endpoint is published with `requireSession = true`, so a request without a valid session cookie
+> gets 401. The facade now registers with `true` and mounts under `/agent/sessions/{token}/fs/...`,
+> for parity with SOAP. The body below is left as written, as a record of how the mistake was made;
+> the follow-up section at the end has the reasoning and the patch.
+
 ## What exists
 
 - The agent's REST core (`RESTModuleImpl`) binds two HTTP contexts on the shared server,
@@ -812,8 +819,10 @@ the Link facade's one-line switch, the registry tests) and applies to the Link b
 follow-up; [`16-rest-facade-for-a-stateless-module.patch`](16-rest-facade-for-a-stateless-module.patch)
 is this design (the facade, its 35 tests, the module page, nine explorer cards and endpoint-map
 entries, route summary, configuration reference, the default module list, and the one-line
-correction to the file-system module's page) and applies on top of it. Both are unified diffs
-with two lines of context.
+correction to the file-system module's page) and applies on top of it. A third,
+[`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch),
+applies on top of the second and switches the facade to a session-scoped namespace (see the
+follow-up section below). All three are unified diffs with two lines of context.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
@@ -832,3 +841,43 @@ What was verified before publishing, and what was not:
 - Not done: a build through the project's own pipeline, and a run against a live agent. A
   smoke script against a running instance is the natural next step and can be strict for every
   route, since file operations are deterministic.
+
+## Follow-up: the session gate
+
+Found while comparing a ported copy of this change against the source, six days after the design
+was published.
+
+**The fact.** The domain module's constructor passes `requireSession = true` to the RPC base
+class, so its SOAP endpoint is published behind the session filter: no valid session cookie, 401
+"No session identifier provided". The Python test-framework wrapper opens a session before its
+first file call for exactly that reason. The module's documentation page said "Session Required:
+NO"; that page is hand-written, and it was wrong. Decision 1 above was taken from the page and
+from the class hierarchy (the module extends the plain RPC base, not the sessioned one), and
+neither was checked against the constructor.
+
+**Why parity rather than keeping the root namespace.** The session is not a security control
+(anyone can open one, without credentials); it is a lifecycle and idle-timeout mechanism, and the
+file operations never touch it. So nothing breaks either way. But a REST surface that is more
+permissive than the SOAP surface for the same module needs a written justification, and parity
+needs none. The facade now registers with `true`.
+
+**What changed** (the follow-up patch, 8 files, +174/-92):
+
+- `FSRESTModuleImpl`: `registerNamespace(FS_NAMESPACE, this, true)`; the route table becomes
+  `Route<Session>`, so the copy handler receives the session and builds its `Location` header
+  under `/agent/sessions/{token}/fs/files?path=...`; `getStatus()` and the Javadoc follow.
+- The core's class Javadoc lists the namespace as session-scoped.
+- Tests: the mocked exchange now carries a session; the `Location` assertion checks the
+  session-scoped prefix; two new tests mock the module manager and pin the decision (`load()`
+  registers with `true` and `unload()` unregisters; `load()` fails when registration is refused).
+- Documentation: the nine explorer cards gain a `sessionToken` field and the new paths, the
+  endpoint-map entries carry `{sessionToken}`, the module page says "Session Required: YES" and
+  explains why, the domain module's page is corrected, and the properties comment follows.
+
+**What did not change.** The registry still supports namespaces without a session (`false`),
+covered by note 17's registry tests; it simply has no user yet. The unified API made this
+correction a one-argument change plus its consequences, which is the argument for that API.
+
+Verified as before: compiled against the real sources with stubs for the third-party APIs, zero
+errors; 72 tests passed, 0 failed, 1 skipped. Not built through the project's own pipeline.
+Patch: [`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch).
