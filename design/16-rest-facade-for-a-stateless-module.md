@@ -824,9 +824,11 @@ sit beside it for readers who need only a part:
 [`17-rest-namespace-registration.patch`](17-rest-namespace-registration.patch) is the infrastructure
 alone, for the Link branch as a follow-up, and
 [`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch)
-is for a tree that already carries the first published version of the facade: remove the three
-facade files first (the patch re-adds them whole), then apply; its header lists the two lines left to
-edit by hand. All are unified diffs with two lines of context.
+is the diff of the review in [note 19](19-review-of-a-rest-facade-pull-request.md) against the
+pull request's own commit (the author's port of the first published facade onto the merged Link
+branch): session parity, the explorer map entries, the configuration-reference entry, the
+real-file-system test and the page corrections, as line-by-line changes. The first two are unified
+diffs with two lines of context, the third with three.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
