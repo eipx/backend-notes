@@ -1,45 +1,60 @@
-# Sanitized follow-up patch for design note 16: the file-system facade registers its namespace
-# with a session, as the domain module's SOAP endpoint does. Applies on top of
-# 16-rest-facade-for-a-stateless-module.patch (which applies on top of 17-rest-namespace-registration.patch).
-# Identifiers are renamed consistently (package root, product and module names), so the paths will
-# not match any public tree; the patch is for reading alongside the note. Unified diff, 2 lines of
-# context, 8 files, +174/-92.
-# Verification: compiled with javac against the real project sources (zero errors; third-party APIs
-# stubbed for the compile); the facade's tests (35, plus 2 new registration tests), the registry
-# tests (11) and the Link facade's tests (25) were executed: 72 passed, 0 failed, 1 skipped (an
-# unreadable-file case the host OS cannot simulate). Not built or run through the project's own
-# build pipeline.
+# Sanitized patch for design note 16, for a tree that ALREADY carries the first published version of
+# the facade, ported by hand (as the author's own copy was). Prerequisite: remove the three facade files
+# first with git rm (core-module/.../modules/core/FSRESTModuleImpl.java, the test beside it, and
+# docs/modules/FSRESTModuleImpl.md); the patch re-adds them whole, in their final, session-scoped form.
+# It also adds the three files the hand port had skipped (the explorer page's endpoint-map entries, the
+# configuration-reference generator entry and the reference section), moves the nine explorer cards to
+# the session-scoped paths with a session-token field, updates the core's Javadoc route table, and fixes
+# one log message in the Link facade. Not included, to edit by hand: the file-system module's page
+# (Session Required: YES, plus the sentence quoted in the note's follow-up) and the properties comment.
+# Built against a reconstruction of the ported tree from its diff: if a hunk is rejected, apply with
+# --reject and finish that hunk by hand. Identifiers are renamed consistently (package root, product and
+# module names), so restore them before applying. Unified diff, 2 lines of context, 9 files, +1342/-33.
 
 diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
-index b02458a0..3d7f15c2 100644
---- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
+new file mode 100644
+index 00000000..3d7f15c2
+--- /dev/null
 +++ b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImpl.java
-@@ -26,8 +26,10 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
- /**
-  * This class implements the REST entry point for the file system (FS)
-- * module. File system operations are not owned by a session, so this module
-- * registers the root namespace {@code "fs"} on {@link RESTModuleImpl} via
+@@ -0,0 +1,596 @@
++package io.github.eipx.remoteagent.modules.core;
++
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.URLEncoder;
++import java.util.*;
++
++import com.sun.net.httpserver.HttpExchange;
++
++import org.apache.log4j.Logger;
++
++import io.github.eipx.remoteagent.http.Session;
++import io.github.eipx.remoteagent.io.Config;
++import io.github.eipx.remoteagent.io.IOUtil;
++import io.github.eipx.remoteagent.logging.LogUtil;
++import io.github.eipx.remoteagent.logging.Logging;
++import io.github.eipx.remoteagent.modules.AbstractStoppableModule;
++import io.github.eipx.remoteagent.modules.ModuleManager;
++import io.github.eipx.remoteagent.rest.RESTNamespaceHandler;
++import io.github.eipx.remoteagent.rest.RESTRouter;
++import io.github.eipx.remoteagent.rest.RESTRouter.Route;
++import io.github.eipx.remoteagent.rest.RESTUtil;
++
++/**
++ * This class implements the REST entry point for the file system (FS)
 + * module. The SOAP endpoint of {@link FSModuleImpl} is published with
 + * {@code requireSession = true}, so the REST namespace {@code "fs"} is
 + * registered on {@link RESTModuleImpl} the same way, via
-  * {@link RESTModuleImpl#registerNamespace(String, RESTNamespaceHandler, boolean)} with
-- * {@code requireSession} false, and delegates every request to the
++ * {@link RESTModuleImpl#registerNamespace(String, RESTNamespaceHandler, boolean)} with
 + * {@code requireSession} true: both transports demand an open session, and
 + * neither uses it for anything else. This module delegates every request to the
-  * public methods of {@link FSModuleImpl} — the same domain logic used by the
-  * SOAP (JAX-WS) entry point. Paths travel URL-encoded in the {@code path}
-@@ -35,13 +37,13 @@ import io.github.eipx.remoteagent.rest.RESTUtil;
-  *
-  * <pre>
-- * GET    /agent/fs/entries?path=                      fileExists / directoryExists / fileSize
-- * GET    /agent/fs/files?path=[&offset=&length=]      readEntireFile / readFile
-- * PUT    /agent/fs/files?path=                        writeFile          (body: application/octet-stream)
-- * DELETE /agent/fs/files?path=                        removeFile
-- * POST   /agent/fs/files/copy                         copyFile           (body: {"source","destination"})
-- * POST   /agent/fs/files/move                         moveFile           (body: {"source","destination"})
-- * GET    /agent/fs/directories?path=                  listDirectory
-- * PUT    /agent/fs/directories?path=                  makeDirectory
-- * DELETE /agent/fs/directories?path=                  removeDirectory
++ * public methods of {@link FSModuleImpl} — the same domain logic used by the
++ * SOAP (JAX-WS) entry point. Paths travel URL-encoded in the {@code path}
++ * query parameter and are interpreted exactly as SOAP interprets them.
++ *
++ * <pre>
 + * GET    /agent/sessions/{sessionToken}/fs/entries?path=                      fileExists / directoryExists / fileSize
 + * GET    /agent/sessions/{sessionToken}/fs/files?path=[&offset=&length=]      readEntireFile / readFile
 + * PUT    /agent/sessions/{sessionToken}/fs/files?path=                        writeFile          (body: application/octet-stream)
@@ -49,29 +64,66 @@ index b02458a0..3d7f15c2 100644
 + * GET    /agent/sessions/{sessionToken}/fs/directories?path=                  listDirectory
 + * PUT    /agent/sessions/{sessionToken}/fs/directories?path=                  makeDirectory
 + * DELETE /agent/sessions/{sessionToken}/fs/directories?path=                  removeDirectory
-  * </pre>
-  *
-@@ -72,5 +74,6 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 
- 	/**
--	 * Root REST namespace registered on {@link RESTModuleImpl}.
++ * </pre>
++ *
++ * <p>Status mapping of the domain's quiet failures: {@code 404} when the
++ * named entry is not there (or not of the named kind), {@code 403} when it is
++ * there but not readable or writable, {@code 409} when the operation cannot
++ * be applied to the current state (parent missing, directory not empty,
++ * destination occupied), {@code 413} above {@link #maxFileSize}. I/O
++ * exceptions propagate to the core's {@code 500} handler, as they become
++ * faults on SOAP.
++ *
++ * <p>{@code FSModuleImpl} is part of the default module list, so this module
++ * is listed there as well; see {@code agent.properties}.
++ *
++ * @see		io.github.eipx.remoteagent.rest.RESTNamespaceHandler
++ * @see		io.github.eipx.remoteagent.rest.RESTRouter
++ * @see		io.github.eipx.remoteagent.modules.core.RESTModuleImpl
++ * @see		io.github.eipx.remoteagent.modules.core.FSModuleImpl
++ *
++ * @author  (redacted)
++ */
++public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseModule, RESTNamespaceHandler
++{
++	/**
++	 * Static log4j {@code Logger}.
++	 */
++	public static final Logger logger = Logger.getLogger(FSRESTModuleImpl.class);
++
++	/**
 +	 * Session-scoped REST namespace registered on {@link RESTModuleImpl} and
 +	 * mounted under {@code /agent/sessions/{sessionToken}/fs}.
- 	 */
- 	public static final String FS_NAMESPACE = "fs";
-@@ -103,14 +106,14 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 	 * {@code "fs"} namespace. Earlier entries take precedence over later ones.
- 	 */
--	private final List<Route<Void>> routes = Arrays.asList(
--			new Route<Void>("GET",    new String[] {"entries"},        (x, c, s) -> handleStat(x)),
--			new Route<Void>("GET",    new String[] {"files"},          (x, c, s) -> handleReadFile(x)),
--			new Route<Void>("PUT",    new String[] {"files"},          (x, c, s) -> handleWriteFile(x)),
--			new Route<Void>("DELETE", new String[] {"files"},          (x, c, s) -> handleRemoveFile(x)),
--			new Route<Void>("POST",   new String[] {"files", "copy"},  (x, c, s) -> handleCopyFile(x)),
--			new Route<Void>("POST",   new String[] {"files", "move"},  (x, c, s) -> handleMoveFile(x)),
--			new Route<Void>("GET",    new String[] {"directories"},    (x, c, s) -> handleListDirectory(x)),
--			new Route<Void>("PUT",    new String[] {"directories"},    (x, c, s) -> handleMakeDirectory(x)),
--			new Route<Void>("DELETE", new String[] {"directories"},    (x, c, s) -> handleRemoveDirectory(x))
++	 */
++	public static final String FS_NAMESPACE = "fs";
++
++	/**
++	 * Content type used for raw file payloads.
++	 */
++	public static final String CONTENT_TYPE_FILE = "application/octet-stream";
++
++	/**
++	 * Largest file payload accepted or returned whole, in bytes; larger
++	 * requests receive {@code 413}. Reads can page past it with
++	 * {@code offset}/{@code length}. Guards the shared request thread pool
++	 * against a single huge transfer; the SOAP path has no such bound.
++	 */
++	protected static final long maxFileSize = Config.getProperty(FSRESTModuleImpl.class, "maxFileSize", 64L * 1024 * 1024);
++
++	/**
++	 * Internal REST module on which the {@code "fs"} namespace is registered.
++	 */
++	private RESTModuleImpl restModuleImpl = null;
++
++	/**
++	 * Internal FS module to which domain operations are delegated.
++	 */
++	private FSModuleImpl fsModuleImpl = null;
++
++	/**
++	 * Ordered FS routes, evaluated against path segments relative to the
++	 * {@code "fs"} namespace. Earlier entries take precedence over later ones.
++	 */
 +	private final List<Route<Session>> routes = Arrays.asList(
 +			new Route<Session>("GET",    new String[] {"entries"},        (x, c, s) -> handleStat(x)),
 +			new Route<Session>("GET",    new String[] {"files"},          (x, c, s) -> handleReadFile(x)),
@@ -82,59 +134,485 @@ index b02458a0..3d7f15c2 100644
 +			new Route<Session>("GET",    new String[] {"directories"},    (x, c, s) -> handleListDirectory(x)),
 +			new Route<Session>("PUT",    new String[] {"directories"},    (x, c, s) -> handleMakeDirectory(x)),
 +			new Route<Session>("DELETE", new String[] {"directories"},    (x, c, s) -> handleRemoveDirectory(x))
- 	);
- 
-@@ -147,6 +150,6 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 			}
- 
--			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, false);
--			if(!result) logger.error(String.format("Unable to register REST root namespace: %s", FS_NAMESPACE));
++	);
++
++	public FSRESTModuleImpl()
++	{
++		super(FSRESTModuleImpl.class);
++		Logging.Entry(logger, this);
++
++		if(!dependencies.add(RESTModuleImpl.class.getName())) logger.warn("Unable to add RESTModuleImpl dependency!");
++		if(!dependencies.add(FSModuleImpl.class.getName()))   logger.warn("Unable to add FSModuleImpl dependency!");
++
++		Logging.Exit(logger, this);
++	}
++
++	// Module Members
++
++	@Override
++	public boolean load(final ModuleManager moduleManager)
++	{
++		Logging.Entry(logger, this, moduleManager);
++
++		boolean result = super.load(moduleManager);
++
++		if(result)
++		{
++			restModuleImpl = moduleManager.getModule(RESTModuleImpl.class);
++			fsModuleImpl   = moduleManager.getModule(FSModuleImpl.class);
++
++			if(restModuleImpl == null || fsModuleImpl == null)
++			{
++				logger.error(String.format("Required dependency not loaded: RESTModuleImpl=%s, FSModuleImpl=%s",
++						restModuleImpl, fsModuleImpl));
++				return Logging.Exit(logger, this, false);
++			}
++
 +			result = restModuleImpl.registerNamespace(FS_NAMESPACE, this, true);
 +			if(!result) logger.error(String.format("Unable to register REST namespace: %s", FS_NAMESPACE));
- 		}
- 
-@@ -172,5 +175,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 	 *
- 	 * @param	exchange	The HTTP exchange.
--	 * @param	session		Always {@code null}: the namespace is registered without a session.
++		}
++
++		return Logging.Exit(logger, this, result);
++	}
++
++	@Override
++	public boolean unload(final ModuleManager moduleManager)
++	{
++		Logging.Entry(logger, this, moduleManager);
++
++		if(restModuleImpl != null) restModuleImpl.unregisterNamespace(FS_NAMESPACE);
++		restModuleImpl = null;
++		fsModuleImpl = null;
++
++		return Logging.Exit(logger, this, super.unload(moduleManager));
++	}
++
++	// RESTNamespaceHandler Members
++
++	/**
++	 * Dispatches a request within the {@code "fs"} namespace.
++	 *
++	 * @param	exchange	The HTTP exchange.
 +	 * @param	session		The session resolved by the core, never {@code null}; required for parity with the SOAP endpoint, not used by the file operations.
- 	 * @param	segments	Path segments relative to the namespace.
- 	 *
-@@ -180,8 +183,8 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 	public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
- 	{
--		Logging.Entry(logger, this, exchange, segments);
++	 * @param	segments	Path segments relative to the namespace.
++	 *
++	 * @throws Throwable
++	 */
++	@Override
++	public void handle(final HttpExchange exchange, final Session session, final String[] segments) throws Throwable
++	{
 +		Logging.Entry(logger, this, exchange, session, segments);
- 
- 		final String method = exchange.getRequestMethod().toUpperCase();
--		if(!RESTRouter.dispatch(exchange, method, segments, routes, null))
++
++		final String method = exchange.getRequestMethod().toUpperCase();
 +		if(!RESTRouter.dispatch(exchange, method, segments, routes, session))
- 			RESTUtil.sendNotFound(exchange);
- 
-@@ -194,5 +197,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 		Logging.Entry(logger, this);
- 
--		String result = String.format("<label>REST namespace:</label> %s%s<br>", RESTModuleImpl.ROOT_CONTEXT_PREFIX, FS_NAMESPACE);
++			RESTUtil.sendNotFound(exchange);
++
++		Logging.Exit(logger, this);
++	}
++
++	@Override
++	public String getStatus()
++	{
++		Logging.Entry(logger, this);
++
 +		String result = String.format("<label>REST namespace:</label> %s/{sessionToken}/%s<br>", AbstractRESTModule.SESSION_CONTEXT_PATH, FS_NAMESPACE);
- 
- 		return Logging.Exit(logger, this, result);
-@@ -332,5 +335,5 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 	 * {@code 201} with the copy's {@code Location}.
- 	 */
--	protected void handleCopyFile(final HttpExchange exchange) throws Throwable
++
++		return Logging.Exit(logger, this, result);
++	}
++
++	// Route Handlers
++
++	/**
++	 * {@code GET /fs/entries?path=} — existence, type and size in one safe
++	 * call. Never {@code 404}: {@code exists:false} is an answer, as the SOAP
++	 * {@code false} is.
++	 */
++	protected void handleStat(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		final boolean isFile = fsModuleImpl.fileExists(path);
++		final boolean isDirectory = !isFile && fsModuleImpl.directoryExists(path);
++
++		final Map<String, Object> body = new LinkedHashMap<String, Object>();
++		body.put("path", path);
++		body.put("exists", isFile || isDirectory);
++		body.put("type", isFile ? "file" : isDirectory ? "directory" : "none");
++		if(isFile)
++		{
++			final long size = fsModuleImpl.fileSize(path);   // -1 when the file is not readable
++			body.put("readable", size >= 0);
++			if(size >= 0) body.put("size", size);
++		}
++		RESTUtil.sendJsonResponse(exchange, 200, body);
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code GET /fs/files?path=[&offset=&length=]} — the whole file, or a
++	 * window of it when {@code length} is given.
++	 */
++	protected void handleReadFile(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		final Properties params = RESTUtil.getQueryParameters(exchange);
++		final Integer offset = parseIntParameter(exchange, params, "offset", 0, 0);
++		if(offset == null) { Logging.Exit(logger, this); return; }
++		final Integer length = parseIntParameter(exchange, params, "length", -1, 1);
++		if(length == null) { Logging.Exit(logger, this); return; }
++
++		if(!fsModuleImpl.fileExists(path))
++		{
++			RESTUtil.sendNotFound(exchange);
++			Logging.Exit(logger, this); return;
++		}
++		final long size = fsModuleImpl.fileSize(path);
++		if(size < 0)
++		{
++			RESTUtil.sendErrorResponse(exchange, 403, String.format("File is not readable: %s", path));
++			Logging.Exit(logger, this); return;
++		}
++		if(length < 0 && size > maxFileSize)
++		{
++			RESTUtil.sendErrorResponse(exchange, 413,
++					String.format("File exceeds maxFileSize (%d); read it with offset/length", maxFileSize));
++			Logging.Exit(logger, this); return;
++		}
++
++		// IOUtil.readInputStream() returns null for an empty stream, so null here
++		// means "nothing to return" — existence and readability were established above.
++		final byte[] content = (length < 0) ? fsModuleImpl.readEntireFile(path)
++		                                    : fsModuleImpl.readFile(path, length, offset);
++		RESTUtil.sendBinaryResponse(exchange, 200, content, CONTENT_TYPE_FILE);
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code PUT /fs/files?path=} — full overwrite (idempotent); {@code 201}
++	 * when the file did not exist, {@code 200} when it did.
++	 */
++	protected void handleWriteFile(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		final String parent = new File(path).getParent();
++		if(parent != null && !fsModuleImpl.directoryExists(parent))
++		{
++			RESTUtil.sendErrorResponse(exchange, 409, String.format("Parent directory does not exist: %s", parent));
++			Logging.Exit(logger, this); return;
++		}
++
++		final byte[] content = readBoundedBody(exchange);   // empty body = empty file, as SOAP allows
++		if(content == null) { Logging.Exit(logger, this); return; }   // 400 or 413 already sent
++
++		final boolean existed = fsModuleImpl.fileExists(path);
++		if(!fsModuleImpl.writeFile(path, content))
++		{
++			if(existed) RESTUtil.sendErrorResponse(exchange, 403, String.format("File is not writable: %s", path));
++			else        RESTUtil.sendErrorResponse(exchange, 409, String.format("Cannot create file: %s", path));
++			Logging.Exit(logger, this); return;
++		}
++
++		final Map<String, Object> body = success();
++		body.put("bytes", content.length);
++		RESTUtil.sendJsonResponse(exchange, existed ? 200 : 201, body);
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code DELETE /fs/files?path=}
++	 */
++	protected void handleRemoveFile(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		if(!fsModuleImpl.fileExists(path))      RESTUtil.sendNotFound(exchange);
++		else if(!fsModuleImpl.removeFile(path)) RESTUtil.sendErrorResponse(exchange, 403, String.format("File is not writable or is in use: %s", path));
++		else                                    RESTUtil.sendJsonResponse(exchange, 200, success());
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code POST /fs/files/copy} with {@code {"source","destination"}} —
++	 * {@code 201} with the copy's {@code Location}.
++	 */
 +	protected void handleCopyFile(final HttpExchange exchange, final Session session) throws Throwable
- 	{
- 		Logging.Entry(logger, this, exchange);
-@@ -344,6 +347,7 @@ public class FSRESTModuleImpl extends AbstractStoppableModule implements BaseMod
- 		else
- 		{
--			exchange.getResponseHeaders().set("Location", String.format("%s%s/files?path=%s",
--					RESTModuleImpl.ROOT_CONTEXT_PREFIX, FS_NAMESPACE, URLEncoder.encode(pair[1], "UTF-8")));
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String[] pair = requireSourceDestination(exchange);
++		if(pair == null) { Logging.Exit(logger, this); return; }
++
++		if(!fsModuleImpl.fileExists(pair[0])) RESTUtil.sendNotFound(exchange);
++		else if(!fsModuleImpl.copyFile(pair[0], pair[1]))
++			RESTUtil.sendErrorResponse(exchange, 409, String.format("Destination exists and is not writable: %s", pair[1]));
++		else
++		{
 +			exchange.getResponseHeaders().set("Location", String.format("%s/%s/%s/files?path=%s",
 +					AbstractRESTModule.SESSION_CONTEXT_PATH, RESTUtil.encodeToken(session.getID()),
 +					FS_NAMESPACE, URLEncoder.encode(pair[1], "UTF-8")));
- 			RESTUtil.sendJsonResponse(exchange, 201, success());
- 		}
++			RESTUtil.sendJsonResponse(exchange, 201, success());
++		}
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code POST /fs/files/move} with {@code {"source","destination"}}.
++	 * Moves directories too, as the domain method does.
++	 */
++	protected void handleMoveFile(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String[] pair = requireSourceDestination(exchange);
++		if(pair == null) { Logging.Exit(logger, this); return; }
++
++		if(!fsModuleImpl.fileExists(pair[0]) && !fsModuleImpl.directoryExists(pair[0])) RESTUtil.sendNotFound(exchange);
++		else if(!fsModuleImpl.moveFile(pair[0], pair[1]))
++			RESTUtil.sendErrorResponse(exchange, 409, String.format("Cannot move to destination: %s", pair[1]));
++		else RESTUtil.sendJsonResponse(exchange, 200, success());
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code GET /fs/directories?path=} — entries as a JSON array (SOAP
++	 * returns newline-separated text).
++	 */
++	protected void handleListDirectory(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		final String listing = fsModuleImpl.listDirectory(path);   // null: not a readable directory
++		if(listing == null) { RESTUtil.sendNotFound(exchange); Logging.Exit(logger, this); return; }
++
++		final List<String> entries = new ArrayList<String>();
++		for(final String name : listing.split(IOUtil.newline)) if(!name.isEmpty()) entries.add(name);
++
++		final Map<String, Object> body = new LinkedHashMap<String, Object>();
++		body.put("path", path);
++		body.put("entries", entries);
++		RESTUtil.sendJsonResponse(exchange, 200, body);
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code PUT /fs/directories?path=} — {@code 201} created, {@code 200}
++	 * already present (idempotent).
++	 */
++	protected void handleMakeDirectory(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		// The domain returns false both for "already a directory" and for a failed
++		// mkdir, so existence is checked first to keep the two apart.
++		if(fsModuleImpl.directoryExists(path))    RESTUtil.sendJsonResponse(exchange, 200, success());
++		else if(fsModuleImpl.makeDirectory(path)) RESTUtil.sendJsonResponse(exchange, 201, success());
++		else RESTUtil.sendErrorResponse(exchange, 409, String.format("Cannot create directory (parent missing or not writable): %s", path));
++
++		Logging.Exit(logger, this);
++	}
++
++	/**
++	 * {@code DELETE /fs/directories?path=}
++	 */
++	protected void handleRemoveDirectory(final HttpExchange exchange) throws Throwable
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = requirePath(exchange);
++		if(path == null) { Logging.Exit(logger, this); return; }
++
++		if(!fsModuleImpl.directoryExists(path))      RESTUtil.sendNotFound(exchange);
++		else if(!fsModuleImpl.removeDirectory(path)) RESTUtil.sendErrorResponse(exchange, 409, String.format("Directory is not empty or not writable: %s", path));
++		else                                         RESTUtil.sendJsonResponse(exchange, 200, success());
++
++		Logging.Exit(logger, this);
++	}
++
++	// Private Members
++
++	/**
++	 * Returns the {@code path} query parameter, or sends {@code 400} and
++	 * returns {@code null} when it is missing or blank.
++	 */
++	private String requirePath(final HttpExchange exchange) throws IOException
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String path = RESTUtil.getQueryParameters(exchange).getProperty("path");
++		if(path == null || path.trim().isEmpty())
++		{
++			RESTUtil.sendErrorResponse(exchange, 400, "Query parameter 'path' is required");
++			return Logging.Exit(logger, this, null);
++		}
++
++		return Logging.Exit(logger, this, path);
++	}
++
++	/**
++	 * Returns {@code {source, destination}} from the JSON body, or sends
++	 * {@code 400} and returns {@code null}.
++	 */
++	private String[] requireSourceDestination(final HttpExchange exchange) throws IOException
++	{
++		Logging.Entry(logger, this, exchange);
++
++		Map<String, Object> json = null;
++		try { json = RESTUtil.parseJsonObject(RESTUtil.readRequestBody(exchange)); }
++		catch(final Exception e) { /* handled below */ }
++
++		final Object source      = (json != null) ? json.get("source")      : null;
++		final Object destination = (json != null) ? json.get("destination") : null;
++		if(source == null || destination == null
++				|| source.toString().trim().isEmpty() || destination.toString().trim().isEmpty())
++		{
++			RESTUtil.sendErrorResponse(exchange, 400, "JSON body with 'source' and 'destination' is required");
++			return Logging.Exit(logger, this, null);
++		}
++
++		return Logging.Exit(logger, this, new String[] { source.toString(), destination.toString() });
++	}
++
++	/**
++	 * Parses an integer query parameter: absent yields the default; invalid
++	 * or below the minimum sends {@code 400} and returns {@code null}.
++	 */
++	private Integer parseIntParameter(final HttpExchange exchange, final Properties params, final String name,
++	                                  final int defaultValue, final int minimum) throws IOException
++	{
++		Logging.Entry(logger, this, exchange, name, defaultValue, minimum);
++
++		final String raw = params.getProperty(name);
++		if(raw == null) return Logging.Exit(logger, this, Integer.valueOf(defaultValue));
++
++		try
++		{
++			final int value = Integer.parseInt(raw);
++			if(value < minimum) throw new NumberFormatException();
++			return Logging.Exit(logger, this, Integer.valueOf(value));
++		}
++		catch(final NumberFormatException nfe)
++		{
++			RESTUtil.sendErrorResponse(exchange, 400,
++					String.format("Invalid %s parameter (integer >= %d expected): %s", name, minimum, raw));
++			return Logging.Exit(logger, this, null);
++		}
++	}
++
++	/**
++	 * Reads the whole request body up to {@link #maxFileSize}. Sends
++	 * {@code 400} for a malformed {@code Content-Length}, {@code 413} above the
++	 * limit (checked against the declared length first, then enforced while
++	 * reading), and returns {@code null} in both cases. An empty body yields
++	 * an empty array.
++	 * <p>
++	 * Note: {@link IOUtil#readInputStream(InputStream, int)} performs a single
++	 * {@code read()} and may return a partial chunk, so it is not used here;
++	 * the body is read to end-of-stream.
++	 */
++	private byte[] readBoundedBody(final HttpExchange exchange) throws IOException
++	{
++		Logging.Entry(logger, this, exchange);
++
++		final String declared = exchange.getRequestHeaders().getFirst("Content-Length");
++		if(declared != null)
++		{
++			try
++			{
++				if(Long.parseLong(declared.trim()) > maxFileSize)
++				{
++					RESTUtil.sendErrorResponse(exchange, 413, String.format("Body exceeds maxFileSize (%d)", maxFileSize));
++					return Logging.Exit(logger, this, null);
++				}
++			}
++			catch(final NumberFormatException nfe)
++			{
++				RESTUtil.sendErrorResponse(exchange, 400, String.format("Invalid Content-Length: %s", declared));
++				return Logging.Exit(logger, this, null);
++			}
++		}
++
++		final ByteArrayOutputStream out = new ByteArrayOutputStream();
++		final byte[] buffer = new byte[64 * 1024];
++		try(final InputStream in = exchange.getRequestBody())
++		{
++			int read;
++			while((read = in.read(buffer)) != -1)
++			{
++				if(out.size() + read > maxFileSize)
++				{
++					RESTUtil.sendErrorResponse(exchange, 413, String.format("Body exceeds maxFileSize (%d)", maxFileSize));
++					return Logging.Exit(logger, this, null);
++				}
++				out.write(buffer, 0, read);
++			}
++		}
++
++		return Logging.Exit(logger, this, out.toByteArray());
++	}
++
++	/**
++	 * A fresh {@code {"success": true}} body.
++	 */
++	private static Map<String, Object> success()
++	{
++		final Map<String, Object> body = new LinkedHashMap<String, Object>();
++		body.put("success", true);
++		return body;
++	}
++
++	// BaseModule Members
++
++	@Override
++	public String getName()
++	{
++		Logging.Entry(logger, this);
++
++		return Logging.Exit(logger, this, LogUtil.getUnqualifyClassName(FSRESTModuleImpl.class));
++	}
++
++	@Override
++	public String getVersion()
++	{
++		Logging.Entry(logger, this);
++
++		return Logging.Exit(logger, this, LogUtil.getVersion(FSRESTModuleImpl.class));
++	}
++
++	// Object Members
++
++	@Override
++	public String toString()
++	{
++		return LogUtil.getUnqualifyClassName(this);
++	}
++}
 diff --git a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java b/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
 index f9431d3f..012953b1 100644
 --- a/core-module/src/main/java/io/github/eipx/remoteagent/modules/core/RESTModuleImpl.java
@@ -147,63 +625,513 @@ index f9431d3f..012953b1 100644
   *
   * The module also supports an opt-in {@code X-Forward-To} request-forwarding
 diff --git a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
-index 56b1945e..3cfeb3ae 100644
---- a/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
+new file mode 100644
+index 00000000..3cfeb3ae
+--- /dev/null
 +++ b/core-module/src/test/java/io/github/eipx/remoteagent/modules/core/FSRESTModuleImplTest.java
-@@ -27,9 +27,14 @@ import com.sun.net.httpserver.Headers;
- import com.sun.net.httpserver.HttpExchange;
- 
+@@ -0,0 +1,534 @@
++package io.github.eipx.remoteagent.modules.core;
++
++import static org.junit.Assert.*;
++import static org.junit.Assume.assumeTrue;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.Mockito.*;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++import java.lang.reflect.Field;
++import java.net.URI;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.Arrays;
++
++import org.junit.Before;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++import org.mockito.ArgumentCaptor;
++
++import com.sun.net.httpserver.Headers;
++import com.sun.net.httpserver.HttpExchange;
++
 +import io.github.eipx.remoteagent.http.Session;
 +import io.github.eipx.remoteagent.modules.ModuleManager;
 +import io.github.eipx.remoteagent.rest.RESTUtil;
 +
- /**
-  * Unit tests for {@link FSRESTModuleImpl}. Only the {@link HttpExchange} is
-  * mocked; the handlers run against the real {@link FSModuleImpl} on a
-  * temporary directory, so the status mapping is proven against actual
-- * {@code java.io.File} behaviour rather than a stub.
++/**
++ * Unit tests for {@link FSRESTModuleImpl}. Only the {@link HttpExchange} is
++ * mocked; the handlers run against the real {@link FSModuleImpl} on a
++ * temporary directory, so the status mapping is proven against actual
 + * {@code java.io.File} behaviour rather than a stub. The two registration
 + * tests mock the module manager to pin the session-parity decision.
-  */
- public class FSRESTModuleImplTest
-@@ -39,4 +44,5 @@ public class FSRESTModuleImplTest
- 
-     private FSRESTModuleImpl facade;
++ */
++public class FSRESTModuleImplTest
++{
++    @Rule
++    public TemporaryFolder tmp = new TemporaryFolder();
++
++    private FSRESTModuleImpl facade;
 +    private Session session;
- 
-     /** Mocked exchange plus the stream its response body is written to. */
-@@ -52,4 +58,5 @@ public class FSRESTModuleImplTest
-     {
-         facade = new FSRESTModuleImpl();
++
++    /** Mocked exchange plus the stream its response body is written to. */
++    private static final class Call
++    {
++        final HttpExchange exchange;
++        final ByteArrayOutputStream out;
++        Call(final HttpExchange exchange, final ByteArrayOutputStream out) { this.exchange = exchange; this.out = out; }
++    }
++
++    @Before
++    public void setUp() throws Exception
++    {
++        facade = new FSRESTModuleImpl();
 +        session = new Session() {};
-         // Wire the real domain module directly — same package, bypass load()
-         Field f = FSRESTModuleImpl.class.getDeclaredField("fsModuleImpl");
-@@ -77,5 +84,5 @@ public class FSRESTModuleImplTest
-         ByteArrayOutputStream out = new ByteArrayOutputStream();
-         when(ex.getRequestMethod()).thenReturn(method);
--        when(ex.getRequestURI()).thenReturn(new URI("/agent/fs/x" + (query == null ? "" : "?" + query)));
++        // Wire the real domain module directly — same package, bypass load()
++        Field f = FSRESTModuleImpl.class.getDeclaredField("fsModuleImpl");
++        f.setAccessible(true);
++        f.set(facade, new FSModuleImpl());
++    }
++
++    // -- Helpers --
++
++    private static String enc(final String s) throws Exception
++    {
++        return URLEncoder.encode(s, "UTF-8");
++    }
++
++    private Call call(final String method, final String query, final byte[] body) throws Exception
++    {
++        return call(method, query, new ByteArrayInputStream(body), body.length);
++    }
++
++    private Call call(final String method, final String query, final InputStream body, final long declaredLength) throws Exception
++    {
++        HttpExchange ex = mock(HttpExchange.class);
++        Headers requestHeaders = new Headers();
++        if(declaredLength >= 0) requestHeaders.set("Content-Length", String.valueOf(declaredLength));
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        when(ex.getRequestMethod()).thenReturn(method);
 +        when(ex.getRequestURI()).thenReturn(new URI("/agent/sessions/" + RESTUtil.encodeToken(session.getID()) + "/fs/x" + (query == null ? "" : "?" + query)));
-         when(ex.getRequestHeaders()).thenReturn(requestHeaders);
-         when(ex.getResponseHeaders()).thenReturn(new Headers());
-@@ -99,5 +106,5 @@ public class FSRESTModuleImplTest
-     private void dispatch(final Call c, final String... segments) throws Throwable
-     {
--        facade.handle(c.exchange, null, segments);
++        when(ex.getRequestHeaders()).thenReturn(requestHeaders);
++        when(ex.getResponseHeaders()).thenReturn(new Headers());
++        when(ex.getRequestBody()).thenReturn(body);
++        when(ex.getResponseBody()).thenReturn(out);
++        return new Call(ex, out);
++    }
++
++    private static int status(final Call c) throws IOException
++    {
++        ArgumentCaptor<Integer> status = ArgumentCaptor.forClass(Integer.class);
++        verify(c.exchange).sendResponseHeaders(status.capture(), anyLong());
++        return status.getValue();
++    }
++
++    private static String body(final Call c)
++    {
++        return new String(c.out.toByteArray(), StandardCharsets.UTF_8);
++    }
++
++    private void dispatch(final Call c, final String... segments) throws Throwable
++    {
 +        facade.handle(c.exchange, session, segments);
-     }
- 
-@@ -336,5 +343,7 @@ public class FSRESTModuleImplTest
-         dispatch(c, "files", "copy");
-         assertEquals(201, status(c));
--        assertNotNull(c.exchange.getResponseHeaders().getFirst("Location"));
++    }
++
++    private File file(final String name, final String content) throws Exception
++    {
++        File f = tmp.newFile(name);
++        Files.write(f.toPath(), content.getBytes(StandardCharsets.UTF_8));
++        return f;
++    }
++
++    // -- entries (stat) --
++
++    @Test
++    public void stat_file_reportsTypeAndSize() throws Throwable
++    {
++        File f = file("a.txt", "hello");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "entries");
++        assertEquals(200, status(c));
++        String b = body(c);
++        assertTrue(b, b.contains("\"exists\":true"));
++        assertTrue(b, b.contains("\"type\":\"file\""));
++        assertTrue(b, b.contains("\"size\":5"));
++    }
++
++    @Test
++    public void stat_directory_reportsType() throws Throwable
++    {
++        Call c = call("GET", "path=" + enc(tmp.getRoot().getAbsolutePath()), new byte[0]);
++        dispatch(c, "entries");
++        assertEquals(200, status(c));
++        assertTrue(body(c).contains("\"type\":\"directory\""));
++    }
++
++    @Test
++    public void stat_missing_is200WithExistsFalse() throws Throwable
++    {
++        Call c = call("GET", "path=" + enc(new File(tmp.getRoot(), "nope").getAbsolutePath()), new byte[0]);
++        dispatch(c, "entries");
++        assertEquals(200, status(c));
++        assertTrue(body(c).contains("\"exists\":false"));
++    }
++
++    @Test
++    public void stat_missingPathParameter_returns400() throws Throwable
++    {
++        Call c = call("GET", null, new byte[0]);
++        dispatch(c, "entries");
++        assertEquals(400, status(c));
++    }
++
++    // -- files: read --
++
++    @Test
++    public void readFile_returnsBytesAsOctetStream() throws Throwable
++    {
++        File f = file("a.txt", "hello");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(200, status(c));
++        assertEquals("application/octet-stream", c.exchange.getResponseHeaders().getFirst("Content-Type"));
++        assertEquals("hello", body(c));
++    }
++
++    @Test
++    public void readFile_emptyFile_returns200WithEmptyBody() throws Throwable
++    {
++        File f = tmp.newFile("empty.txt");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(200, status(c));
++        assertEquals("", body(c));
++    }
++
++    @Test
++    public void readFile_window_returnsOffsetAndLength() throws Throwable
++    {
++        File f = file("a.txt", "0123456789");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()) + "&offset=3&length=4", new byte[0]);
++        dispatch(c, "files");
++        assertEquals(200, status(c));
++        assertEquals("3456", body(c));
++    }
++
++    @Test
++    public void readFile_negativeOffset_returns400() throws Throwable
++    {
++        File f = file("a.txt", "x");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()) + "&offset=-1", new byte[0]);
++        dispatch(c, "files");
++        assertEquals(400, status(c));
++    }
++
++    @Test
++    public void readFile_zeroLength_returns400() throws Throwable
++    {
++        File f = file("a.txt", "x");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()) + "&length=0", new byte[0]);
++        dispatch(c, "files");
++        assertEquals(400, status(c));
++    }
++
++    @Test
++    public void readFile_missing_returns404() throws Throwable
++    {
++        Call c = call("GET", "path=" + enc(new File(tmp.getRoot(), "nope.txt").getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(404, status(c));
++    }
++
++    @Test
++    public void readFile_unreadable_returns403() throws Throwable
++    {
++        File f = file("secret.txt", "x");
++        // Not enforceable for privileged users or on some file systems; skip rather than fail there.
++        assumeTrue(f.setReadable(false, false) && !f.canRead());
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(403, status(c));
++    }
++
++    @Test
++    public void readFile_pathWithPlusAndPercent_isDecodedOnce() throws Throwable
++    {
++        File f = file("a+b%20c.txt", "plus");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(200, status(c));
++        assertEquals("plus", body(c));
++    }
++
++    // -- files: write --
++
++    @Test
++    public void writeFile_new_returns201AndWritesContent() throws Throwable
++    {
++        File f = new File(tmp.getRoot(), "new.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), "payload".getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files");
++        assertEquals(201, status(c));
++        assertEquals("payload", new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
++    }
++
++    @Test
++    public void writeFile_existing_returns200AndOverwrites() throws Throwable
++    {
++        File f = file("a.txt", "old-content");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), "new".getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files");
++        assertEquals(200, status(c));
++        assertEquals("new", new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
++    }
++
++    @Test
++    public void writeFile_emptyBody_createsEmptyFile() throws Throwable
++    {
++        File f = new File(tmp.getRoot(), "empty.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(201, status(c));
++        assertEquals(0, f.length());
++    }
++
++    @Test
++    public void writeFile_bodyDeliveredInSmallChunks_isWrittenWhole() throws Throwable
++    {
++        // A stream that hands out one byte per read(): a single-read helper would truncate this.
++        final byte[] data = new byte[10 * 1024];
++        Arrays.fill(data, (byte) 'z');
++        InputStream trickle = new InputStream()
++        {
++            private int i = 0;
++            @Override public int read() { return (i < data.length) ? (data[i++] & 0xff) : -1; }
++            @Override public int read(final byte[] b, final int off, final int len) { int v = read(); if(v < 0) return -1; b[off] = (byte) v; return 1; }
++        };
++        File f = new File(tmp.getRoot(), "big.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), trickle, data.length);
++        dispatch(c, "files");
++        assertEquals(201, status(c));
++        assertEquals(data.length, f.length());
++    }
++
++    @Test
++    public void writeFile_declaredLengthOverLimit_returns413() throws Throwable
++    {
++        File f = new File(tmp.getRoot(), "huge.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), new ByteArrayInputStream(new byte[0]), Long.MAX_VALUE);
++        dispatch(c, "files");
++        assertEquals(413, status(c));
++        assertFalse(f.exists());
++    }
++
++    @Test
++    public void writeFile_malformedContentLength_returns400() throws Throwable
++    {
++        File f = new File(tmp.getRoot(), "x.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), new ByteArrayInputStream(new byte[0]), -1);
++        c.exchange.getRequestHeaders().set("Content-Length", "not-a-number");
++        dispatch(c, "files");
++        assertEquals(400, status(c));
++    }
++
++    @Test
++    public void writeFile_parentMissing_returns409() throws Throwable
++    {
++        File f = new File(new File(tmp.getRoot(), "missing-dir"), "x.txt");
++        Call c = call("PUT", "path=" + enc(f.getAbsolutePath()), "x".getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files");
++        assertEquals(409, status(c));
++    }
++
++    // -- files: remove --
++
++    @Test
++    public void removeFile_returns200ThenRepeat404() throws Throwable
++    {
++        File f = file("a.txt", "x");
++        Call first = call("DELETE", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(first, "files");
++        assertEquals(200, status(first));
++        assertFalse(f.exists());
++        Call second = call("DELETE", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(second, "files");
++        assertEquals(404, status(second));
++    }
++
++    // -- files: copy / move --
++
++    @Test
++    public void copyFile_returns201WithLocation() throws Throwable
++    {
++        File src = file("src.txt", "copy-me");
++        File dst = new File(tmp.getRoot(), "dst.txt");
++        String json = "{\"source\":\"" + escape(src.getAbsolutePath()) + "\",\"destination\":\"" + escape(dst.getAbsolutePath()) + "\"}";
++        Call c = call("POST", null, json.getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files", "copy");
++        assertEquals(201, status(c));
 +        String location = c.exchange.getResponseHeaders().getFirst("Location");
 +        assertNotNull(location);
 +        assertTrue(location, location.startsWith(AbstractRESTModule.SESSION_CONTEXT_PATH + "/" + RESTUtil.encodeToken(session.getID()) + "/fs/files?path="));
-         assertEquals("copy-me", new String(Files.readAllBytes(dst.toPath()), StandardCharsets.UTF_8));
-         assertTrue(src.exists());
-@@ -492,3 +501,34 @@ public class FSRESTModuleImplTest
-         return s.replace("\\", "\\\\").replace("\"", "\\\"");
-     }
++        assertEquals("copy-me", new String(Files.readAllBytes(dst.toPath()), StandardCharsets.UTF_8));
++        assertTrue(src.exists());
++    }
++
++    @Test
++    public void copyFile_missingSource_returns404() throws Throwable
++    {
++        String json = "{\"source\":\"" + escape(new File(tmp.getRoot(), "nope").getAbsolutePath()) + "\",\"destination\":\"" + escape(new File(tmp.getRoot(), "d").getAbsolutePath()) + "\"}";
++        Call c = call("POST", null, json.getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files", "copy");
++        assertEquals(404, status(c));
++    }
++
++    @Test
++    public void copyFile_badJson_returns400() throws Throwable
++    {
++        Call c = call("POST", null, "{not json".getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files", "copy");
++        assertEquals(400, status(c));
++    }
++
++    @Test
++    public void moveFile_returns200AndSourceIsGone() throws Throwable
++    {
++        File src = file("src.txt", "move-me");
++        File dst = new File(tmp.getRoot(), "moved.txt");
++        String json = "{\"source\":\"" + escape(src.getAbsolutePath()) + "\",\"destination\":\"" + escape(dst.getAbsolutePath()) + "\"}";
++        Call c = call("POST", null, json.getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files", "move");
++        assertEquals(200, status(c));
++        assertFalse(src.exists());
++        assertEquals("move-me", new String(Files.readAllBytes(dst.toPath()), StandardCharsets.UTF_8));
++    }
++
++    @Test
++    public void moveDirectory_isAllowed() throws Throwable
++    {
++        File src = tmp.newFolder("srcdir");
++        File dst = new File(tmp.getRoot(), "dstdir");
++        String json = "{\"source\":\"" + escape(src.getAbsolutePath()) + "\",\"destination\":\"" + escape(dst.getAbsolutePath()) + "\"}";
++        Call c = call("POST", null, json.getBytes(StandardCharsets.UTF_8));
++        dispatch(c, "files", "move");
++        assertEquals(200, status(c));
++        assertTrue(dst.isDirectory());
++    }
++
++    // -- directories --
++
++    @Test
++    public void listDirectory_returnsEntries() throws Throwable
++    {
++        File dir = tmp.newFolder("d");
++        file("d/one.txt", "1");
++        file("d/two.txt", "2");
++        Call c = call("GET", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(200, status(c));
++        String b = body(c);
++        assertTrue(b, b.contains("one.txt") && b.contains("two.txt"));
++    }
++
++    @Test
++    public void listDirectory_empty_returnsEmptyArray() throws Throwable
++    {
++        File dir = tmp.newFolder("empty");
++        Call c = call("GET", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(200, status(c));
++        assertTrue(body(c).contains("\"entries\":[]"));
++    }
++
++    @Test
++    public void listDirectory_onFile_returns404() throws Throwable
++    {
++        File f = file("a.txt", "x");
++        Call c = call("GET", "path=" + enc(f.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(404, status(c));
++    }
++
++    @Test
++    public void makeDirectory_returns201ThenRepeat200() throws Throwable
++    {
++        File dir = new File(tmp.getRoot(), "newdir");
++        Call first = call("PUT", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(first, "directories");
++        assertEquals(201, status(first));
++        assertTrue(dir.isDirectory());
++        Call second = call("PUT", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(second, "directories");
++        assertEquals(200, status(second));
++    }
++
++    @Test
++    public void makeDirectory_parentMissing_returns409() throws Throwable
++    {
++        File dir = new File(new File(tmp.getRoot(), "no-parent"), "child");
++        Call c = call("PUT", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(409, status(c));
++    }
++
++    @Test
++    public void removeDirectory_returns200() throws Throwable
++    {
++        File dir = tmp.newFolder("gone");
++        Call c = call("DELETE", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(200, status(c));
++        assertFalse(dir.exists());
++    }
++
++    @Test
++    public void removeDirectory_nonEmpty_returns409() throws Throwable
++    {
++        File dir = tmp.newFolder("full");
++        file("full/x.txt", "x");
++        Call c = call("DELETE", "path=" + enc(dir.getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(409, status(c));
++        assertTrue(dir.exists());
++    }
++
++    @Test
++    public void removeDirectory_missing_returns404() throws Throwable
++    {
++        Call c = call("DELETE", "path=" + enc(new File(tmp.getRoot(), "nope").getAbsolutePath()), new byte[0]);
++        dispatch(c, "directories");
++        assertEquals(404, status(c));
++    }
++
++    // -- routing --
++
++    @Test
++    public void unknownPath_returns404() throws Throwable
++    {
++        Call c = call("GET", null, new byte[0]);
++        dispatch(c, "nonexistent");
++        assertEquals(404, status(c));
++    }
++
++    @Test
++    public void wrongMethod_returns405() throws Throwable
++    {
++        Call c = call("POST", "path=" + enc(tmp.getRoot().getAbsolutePath()), new byte[0]);
++        dispatch(c, "files");
++        assertEquals(405, status(c));
++    }
++
++    // -- helpers --
++
++    private static String escape(final String s)
++    {
++        return s.replace("\\", "\\\\").replace("\"", "\\\"");
++    }
 +    // -- registration: session parity with the SOAP endpoint --
 +
 +    @Test
@@ -235,7 +1163,17 @@ index 56b1945e..3cfeb3ae 100644
 +
 +        assertFalse(module.load(manager));
 +    }
- }
++}
+diff --git a/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java b/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java
+index cf846f78..e2b539c0 100644
+--- a/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java
++++ b/core/src/test/java/io/github/eipx/remoteagent/docgen/ConfigRefGenerator.java
+@@ -137,4 +137,5 @@ public class ConfigRefGenerator {
+         addManual("RESTModuleImpl.forwardTimeout", "int", "120000", "Socket timeout (milliseconds) applied to forwarded requests.");
+         addManual("LinkRESTModuleImpl.maxTimeout", "int", "60000", "Maximum allowed value for the timeout query parameter (milliseconds). Requests exceeding this limit receive 400.");
++        addManual("FSRESTModuleImpl.maxFileSize", "long", "67108864", "Largest file payload accepted (PUT) or returned whole (GET without length), in bytes. Larger requests receive 413; reads can page with offset/length.");
+     }
+ 
 diff --git a/docs/api/REST_ENDPOINTS.md b/docs/api/REST_ENDPOINTS.md
 index 89b32ae3..11a0adc8 100644
 --- a/docs/api/REST_ENDPOINTS.md
@@ -462,21 +1400,20 @@ index 89b32ae3..11a0adc8 100644
    <tr><td><span class="method-badge put" style="font-size:0.72em;min-width:50px;padding:2px 0;">PUT</span></td><td><code>/agent/admin/check_trace_level</code></td><td>Update log level</td></tr>
  </table>
 diff --git a/docs/index.html b/docs/index.html
-index 265f237c..db736f13 100644
+index b821f1ea..db736f13 100644
 --- a/docs/index.html
 +++ b/docs/index.html
-@@ -259,13 +259,13 @@
+@@ -196,4 +196,5 @@
+       '/modules/SessionModuleImpl.md',
+       '/modules/FSModuleImpl.md',
++      '/modules/FSRESTModuleImpl.md',
+       '/modules/ProcessModuleImpl.md',
+       '/modules/RESTModuleImpl.md',
+@@ -257,5 +258,14 @@
+         'link-release':       { method: 'DELETE', path: '/agent/sessions/{sessionToken}/link/attachments/{handlerToken}' },
          'link-callback-req':  { method: 'GET',    path: '/agent/sessions/{sessionToken}/link/attachments/{handlerToken}/callbacks', optionalQuery: ['timeout'] },
-         'link-callback-resp': { method: 'POST',   path: '/agent/sessions/{sessionToken}/link/callbacks/{contextToken}', optionalQuery: ['returnCode'], contentType: 'application/octet-stream' },
--        'fs-stat':   { method: 'GET',    path: '/agent/fs/entries',     queryTemplate: '?path={path}' },
--        'fs-read':   { method: 'GET',    path: '/agent/fs/files',       queryTemplate: '?path={path}', optionalQuery: ['offset', 'length'] },
--        'fs-write':  { method: 'PUT',    path: '/agent/fs/files',       queryTemplate: '?path={path}', contentType: 'application/octet-stream' },
--        'fs-delete': { method: 'DELETE', path: '/agent/fs/files',       queryTemplate: '?path={path}' },
--        'fs-copy':   { method: 'POST',   path: '/agent/fs/files/copy' },
--        'fs-move':   { method: 'POST',   path: '/agent/fs/files/move' },
--        'fs-list':   { method: 'GET',    path: '/agent/fs/directories', queryTemplate: '?path={path}' },
--        'fs-mkdir':  { method: 'PUT',    path: '/agent/fs/directories', queryTemplate: '?path={path}' },
--        'fs-rmdir':  { method: 'DELETE', path: '/agent/fs/directories', queryTemplate: '?path={path}' }
+-        'link-callback-resp': { method: 'POST',   path: '/agent/sessions/{sessionToken}/link/callbacks/{contextToken}', optionalQuery: ['returnCode'], contentType: 'application/octet-stream' }
++        'link-callback-resp': { method: 'POST',   path: '/agent/sessions/{sessionToken}/link/callbacks/{contextToken}', optionalQuery: ['returnCode'], contentType: 'application/octet-stream' },
 +        'fs-stat':   { method: 'GET',    path: '/agent/sessions/{sessionToken}/fs/entries',     queryTemplate: '?path={path}' },
 +        'fs-read':   { method: 'GET',    path: '/agent/sessions/{sessionToken}/fs/files',       queryTemplate: '?path={path}', optionalQuery: ['offset', 'length'] },
 +        'fs-write':  { method: 'PUT',    path: '/agent/sessions/{sessionToken}/fs/files',       queryTemplate: '?path={path}', contentType: 'application/octet-stream' },
@@ -488,48 +1425,27 @@ index 265f237c..db736f13 100644
 +        'fs-rmdir':  { method: 'DELETE', path: '/agent/sessions/{sessionToken}/fs/directories', queryTemplate: '?path={path}' }
        };
  
-diff --git a/docs/modules/FSModuleImpl.md b/docs/modules/FSModuleImpl.md
-index 4978b53f..89961d60 100644
---- a/docs/modules/FSModuleImpl.md
-+++ b/docs/modules/FSModuleImpl.md
-@@ -8,5 +8,5 @@
- - **Type**: <span class='badge-core'>Core</span>
- - **SOAP Endpoint**: `io.github.eipx.remoteagent.modules.core.FSModule`
--- **Session Required**: <span class='badge-no'>NO</span>
-+- **Session Required**: <span class='badge-yes'>YES</span>
- - **Dependencies**: [RPCModule](/modules/RPCModule)
- - **Annotations**: `@MTOM`, `@WebService`
-@@ -14,5 +14,5 @@
- ## Description
- 
--The FSModuleImpl provides remote file system operations via SOAP. It exposes methods for directory and file manipulation backed by `java.io.File`. MTOM (Message Transmission Optimization Mechanism) is enabled for efficient binary transfer of file contents.
-+The FSModuleImpl provides remote file system operations via SOAP. It exposes methods for directory and file manipulation backed by `java.io.File`. MTOM (Message Transmission Optimization Mechanism) is enabled for efficient binary transfer of file contents. The SOAP endpoint is published with `requireSession = true` (the constructor passes the flag to the RPC base class), so a call without a valid session cookie is rejected with `401`.
- 
- ## SOAP API
 diff --git a/docs/modules/FSRESTModuleImpl.md b/docs/modules/FSRESTModuleImpl.md
-index 33229f94..27258a88 100644
---- a/docs/modules/FSRESTModuleImpl.md
+new file mode 100644
+index 00000000..27258a88
+--- /dev/null
 +++ b/docs/modules/FSRESTModuleImpl.md
-@@ -7,6 +7,6 @@
- - **Implements**: `BaseModule`, `RESTNamespaceHandler`
- - **Type**: <span class='badge-core'>Core</span>
--- **REST Namespace**: `/agent/fs`
--- **Session Required**: <span class='badge-no'>NO</span>
+@@ -0,0 +1,124 @@
++# FSRESTModuleImpl
++
++## Module Information
++
++- **Package**: `io.github.eipx.remoteagent.modules.core.FSRESTModuleImpl`
++- **Extends**: `AbstractStoppableModule`
++- **Implements**: `BaseModule`, `RESTNamespaceHandler`
++- **Type**: <span class='badge-core'>Core</span>
 +- **REST Namespace**: `/agent/sessions/{sessionToken}/fs`
 +- **Session Required**: <span class='badge-yes'>YES</span>
- - **Dependencies**: [RESTModuleImpl](/modules/RESTModuleImpl), [FSModuleImpl](/modules/FSModuleImpl)
- 
-@@ -14,12 +14,14 @@
- 
- `FSRESTModuleImpl` is the REST entry point for the file system (FS) module.
--File system operations are not owned by a session — `FSModuleImpl` extends the
--plain RPC base class, and none of its SOAP operations take or resolve a
--session — so this module registers the **root** namespace `fs` on
--[RESTModuleImpl](/modules/RESTModuleImpl) via `registerNamespace("fs", this, false)`
--with `requireSession` false: the core binds `/agent/fs` as its own HTTP context and passes no session. The core REST module binds `/agent/fs`
--as its own HTTP context and delegates every request under it to this module,
--which invokes the public methods of [FSModuleImpl](/modules/FSModuleImpl) — the
--same domain logic used by the SOAP (JAX-WS) entry point.
++- **Dependencies**: [RESTModuleImpl](/modules/RESTModuleImpl), [FSModuleImpl](/modules/FSModuleImpl)
++
++## Description
++
++`FSRESTModuleImpl` is the REST entry point for the file system (FS) module.
 +The SOAP endpoint of `FSModuleImpl` is published with `requireSession = true`
 +(its constructor passes the flag to the RPC base class, so the SOAP context
 +carries the session filter and a call without a valid session cookie gets `401`).
@@ -540,33 +1456,130 @@ index 33229f94..27258a88 100644
 +which the file operations do not otherwise use. The handlers invoke the public
 +methods of [FSModuleImpl](/modules/FSModuleImpl), the same domain logic used by
 +the SOAP (JAX-WS) entry point.
- 
- Paths travel URL-encoded in the `path` query parameter and are interpreted
-@@ -37,5 +39,5 @@ Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;
- Remove `core.FSRESTModuleImpl` from the list to keep the SOAP interface only.
- 
--## REST Routes (`/agent/fs`)
++
++Paths travel URL-encoded in the `path` query parameter and are interpreted
++exactly as SOAP interprets them (absolute operating-system paths; no
++normalization or restriction beyond what the domain applies).
++
++## Activation
++
++`FSModuleImpl` is part of the default module list, and so is this module:
++
++```properties
++Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;core.ProcessModuleImpl;core.RESTModuleImpl;
++```
++
++Remove `core.FSRESTModuleImpl` from the list to keep the SOAP interface only.
++
 +## REST Routes (`/agent/sessions/{sessionToken}/fs`)
- 
- | Method | Path | Handler | SOAP Equivalent | Description |
-@@ -110,5 +112,5 @@ as `fileExists` returns `false`.
- | Component | Description |
- |---|---|
--| `RESTNamespaceHandler` | Interface implemented to receive requests for a registered namespace (session is `null` here) |
++
++| Method | Path | Handler | SOAP Equivalent | Description |
++|---|---|---|---|---|
++| `GET` | `/fs/entries?path=` | `handleStat` | `fileExists`, `directoryExists`, `fileSize` | Existence, type and size in one call |
++| `GET` | `/fs/files?path=[&offset=&length=]` | `handleReadFile` | `readEntireFile`, `readFile` | Read the whole file, or a window of it |
++| `PUT` | `/fs/files?path=` | `handleWriteFile` | `writeFile` | Create or fully overwrite a file (body: `application/octet-stream`) |
++| `DELETE` | `/fs/files?path=` | `handleRemoveFile` | `removeFile` | Delete a file |
++| `POST` | `/fs/files/copy` | `handleCopyFile` | `copyFile` | Copy a file (body: `{"source","destination"}`) |
++| `POST` | `/fs/files/move` | `handleMoveFile` | `moveFile` | Move or rename a file or directory (body: `{"source","destination"}`) |
++| `GET` | `/fs/directories?path=` | `handleListDirectory` | `listDirectory` | List directory entries |
++| `PUT` | `/fs/directories?path=` | `handleMakeDirectory` | `makeDirectory` | Create a directory (parent must exist) |
++| `DELETE` | `/fs/directories?path=` | `handleRemoveDirectory` | `removeDirectory` | Remove an empty directory |
++
++Method choice follows HTTP semantics: reads and existence checks are `GET`
++(safe), full overwrite and "make directory" are `PUT` (idempotent), deletes are
++`DELETE`, and copy/move are `POST` actions because repeating them can change
++the outcome.
++
++## Query Parameters
++
++| Parameter | Routes | Description |
++|---|---|---|
++| `path` | all except `copy`/`move` | Absolute path, URL-encoded; required |
++| `offset` | `GET /fs/files` | Byte offset to start reading from; default `0`; must be `>= 0` |
++| `length` | `GET /fs/files` | Number of bytes to read; omit for the whole file; must be `>= 1` |
++
++## Request Bodies
++
++- `PUT /fs/files`: the raw file content as `application/octet-stream`. An empty
++  body writes an empty file, as SOAP allows.
++- `POST /fs/files/copy`, `POST /fs/files/move`:
++
++```json
++{ "source": "/path/to/source", "destination": "/path/to/destination" }
++```
++
++## Response Bodies
++
++- `GET /fs/entries`: `{"path", "exists", "type": "file"|"directory"|"none", "readable", "size"}`
++  (`readable` and `size` only for files; `size` only when readable).
++- `GET /fs/files`: the file content as `application/octet-stream`.
++- `GET /fs/directories`: `{"path", "entries": [...]}`.
++- `PUT /fs/files`: `{"success": true, "bytes": n}`.
++- Other state changes: `{"success": true}`.
++
++## Response Codes
++
++| Code | Condition |
++|---|---|
++| `200` | Read succeeded; state change applied to an existing entry (overwrite, delete, move, directory already present) |
++| `201` | File or directory created; copy written (`Location` header set) |
++| `400` | Missing `path`, invalid `offset`/`length`, malformed JSON body, malformed `Content-Length` |
++| `403` | Entry exists but is not readable (read) or not writable (overwrite, delete) |
++| `404` | Entry does not exist, or is not of the named kind (a directory where a file is expected and vice versa); unknown route |
++| `405` | Path exists but HTTP method not supported |
++| `409` | Operation cannot be applied to the current state: parent directory missing, directory not empty or not writable, destination occupied |
++| `413` | File or body larger than `FSRESTModuleImpl.maxFileSize` (reads can page with `offset`/`length`) |
++| `500` | I/O error raised by the domain (surfaces as a SOAP fault on the SOAP path) |
++
++`GET /fs/entries` never returns `404`: `"exists": false` is the answer, exactly
++as `fileExists` returns `false`.
++
++## Configuration
++
++| Property | Type | Default | Description |
++|---|---|---|---|
++| `FSRESTModuleImpl.maxFileSize` | long | `67108864` | Largest file payload accepted (`PUT`) or returned whole (`GET` without `length`), in bytes; larger requests receive `413`. |
++
++## Key Components
++
++| Component | Description |
++|---|---|
 +| `RESTNamespaceHandler` | Interface implemented to receive requests for a registered namespace (the core resolves the session before delegating) |
- | `RESTRouter` | Shared route/dispatch utility (`Route<Void>` table) |
- | `FSModuleImpl` | Public domain methods invoked by the handlers |
-@@ -120,3 +122,3 @@ as `fileExists` returns `false`.
- - **Message Format**: Raw bytes for file content; JSON control envelopes
- - **Dependencies**: 2 (RESTModuleImpl, FSModuleImpl)
--- **Session Events**: None (stateless)
++| `RESTRouter` | Shared route/dispatch utility (`Route<Void>` table) |
++| `FSModuleImpl` | Public domain methods invoked by the handlers |
++| `RESTUtil` | Query parsing, JSON parsing, JSON/binary response helpers |
++
++## Summary
++
++- **Transport**: HTTP/1.1 (shared `HttpServer` via `RESTModuleImpl`)
++- **Message Format**: Raw bytes for file content; JSON control envelopes
++- **Dependencies**: 2 (RESTModuleImpl, FSModuleImpl)
 +- **Session Scope**: required, for parity with the SOAP endpoint; not used by the operations
-diff --git a/install/agent.properties b/install/agent.properties
-index d3d5a339..25afb022 100644
---- a/install/agent.properties
-+++ b/install/agent.properties
-@@ -1,3 +1,3 @@
--# core.FSRESTModuleImpl exposes the file system module under /agent/fs; remove it to keep SOAP only.
-+# core.FSRESTModuleImpl exposes the file system module under /agent/sessions/{token}/fs (a session is required, as on SOAP); remove it to keep SOAP only.
- # Optional: append link.LinkRESTModuleImpl; for Link REST endpoints (loads LinkModuleImpl automatically).
- Agent.modules=internal.DiagnosticsModule;core.FSModuleImpl;core.FSRESTModuleImpl;core.ProcessModuleImpl;core.RESTModuleImpl;
+diff --git a/docs/operations/CONFIGURATION_REFERENCE.md b/docs/operations/CONFIGURATION_REFERENCE.md
+index 6c946a52..4d636059 100644
+--- a/docs/operations/CONFIGURATION_REFERENCE.md
++++ b/docs/operations/CONFIGURATION_REFERENCE.md
+@@ -130,4 +130,12 @@ All Remote Agent configuration is managed through properties files using the `Config` cl
+ 
+ 
++## FSRESTModuleImpl Properties
++
++| Property | Type | Default | Description |
++|---|---|---|---|
++| `FSRESTModuleImpl.maxFileSize` | long | `67108864` | Largest file payload accepted (PUT) or returned whole (GET without length), in bytes. Larger requests receive 413; reads can page with offset/length. |
++
++
++
+ ## IBM MQ JMQI Properties
+ 
+diff --git a/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java b/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
+index ebceb4fa..31186520 100644
+--- a/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
++++ b/link-module/src/main/java/io/github/eipx/remoteagent/modules/link/LinkRESTModuleImpl.java
+@@ -180,5 +180,5 @@ public class LinkRESTModuleImpl extends AbstractStoppableModule implements BaseMo
+ 
+ 			result = restModuleImpl.registerNamespace(LINK_NAMESPACE, this, true);
+-			if(!result) logger.error(String.format("Unable to register REST sub-router namespace: %s", LINK_NAMESPACE));
++			if(!result) logger.error(String.format("Unable to register REST namespace: %s", LINK_NAMESPACE));
+ 
+ 			if(maxTimeout >= RESTModuleImpl.forwardTimeout)

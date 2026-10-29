@@ -824,8 +824,9 @@ sit beside it for readers who need only a part:
 [`17-rest-namespace-registration.patch`](17-rest-namespace-registration.patch) is the infrastructure
 alone, for the Link branch as a follow-up, and
 [`16-rest-facade-for-a-stateless-module.follow-up.patch`](16-rest-facade-for-a-stateless-module.follow-up.patch)
-is the delta between the first published version of the facade and the final one. All are unified
-diffs with two lines of context.
+is for a tree that already carries the first published version of the facade: remove the three
+facade files first (the patch re-adds them whole), then apply; its header lists the two lines left to
+edit by hand. All are unified diffs with two lines of context.
 
 Identifiers in the patch are renamed consistently (package root, product and module names), so
 its paths will not match any tree you have; it is meant to be read with the note, not applied as
@@ -864,7 +865,7 @@ file operations never touch it. So nothing breaks either way. But a REST surface
 permissive than the SOAP surface for the same module needs a written justification, and parity
 needs none. The facade now registers with `true`.
 
-**What changed** (the follow-up patch, 8 files, +174/-92):
+**What changed** relative to the first published version:
 
 - `FSRESTModuleImpl`: `registerNamespace(FS_NAMESPACE, this, true)`; the route table becomes
   `Route<Session>`, so the copy handler receives the session and builds its `Location` header
